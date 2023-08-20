@@ -60,15 +60,15 @@ class PartitionedParameterCoordinator:
         param: Parameter
         step_id_last_used_at: int
 
-    def __init__(
-        self,
-        prefetch_bucket_sz: int,
-        max_reuse_distance_in_numel: int,
-        max_available_parameters_in_numel: int,
-        allgather_stream: get_accelerator().Stream,
-        inflight_param_registry: InflightParamRegistry,
-        prefetch_nvme: bool = False,
-    ) -> None:
+    def __init__(self,
+                 prefetch_bucket_sz: int,
+                 max_reuse_distance_in_numel: int,
+                 max_available_parameters_in_numel: int,
+                 allgather_stream: get_accelerator().Stream,
+                 inflight_param_registry: InflightParamRegistry,
+                 prefetch_nvme: bool = False,
+                 use_hpu=False,
+                 no_cuda=False) -> None:
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
         # keeps track of the number of submodules invoked so far.
@@ -91,6 +91,8 @@ class PartitionedParameterCoordinator:
         self.__prefetch_bucket_sz: int = prefetch_bucket_sz
         self.__prefetch_nvme: bool = prefetch_nvme
         self.hierarchy: int = 0
+        self.use_hpu = use_hpu
+        self.no_cuda = no_cuda
 
         # stream that will be used for allgather operations
         self.__allgather_stream: get_accelerator().Stream = allgather_stream
@@ -104,7 +106,8 @@ class PartitionedParameterCoordinator:
         # cudaMallocAsync/cudaFreeAsync. Choosing to not expose this to the user now
         # because ideally in the future its replaced by an async allocation
         # mechanism which doesn't require any configuration by the user.
-        self.__ongoing_fetch_events: Deque[get_accelerator().Event] = collections.deque()
+        #self.__ongoing_fetch_events: Deque[get_accelerator().Event] = collections.deque()
+        self.__ongoing_fetch_events = collections.deque()
         # TODO. make this configurable via JSON
         self.__max_ongoing_fetch_events: int = 2
 
@@ -151,10 +154,9 @@ class PartitionedParameterCoordinator:
 
             if sub_module != self.__submodule_order[self.__step_id]:
                 expected_module_id = self.__submodule_order[self.__step_id].id
-                print_rank_0(
-                    f"Invalidate trace cache @ step {self.__step_id}: "
-                    f"expected module {expected_module_id}, but got module {sub_module.id}",
-                    force=True)
+                if logger.isEnabledFor(logging.DEBUG):
+                    debug_rank0(f"Invalidate trace cache @ step {self.__step_id}: "
+                                f"expected module {expected_module_id}, but got module {sub_module.id}")
                 self._invalidate_trace()
 
     def record_module(self, sub_module: Module) -> None:
@@ -260,16 +262,17 @@ class PartitionedParameterCoordinator:
                 debug_rank0(f"-wait: {param.ds_summary()}")
             if param in self.__inflight_param_registry:
                 with get_accelerator().stream(self.__allgather_stream):
-                    while self.__ongoing_fetch_events and self.__ongoing_fetch_events[0].query():
-                        self.__ongoing_fetch_events.popleft()
-                    if len(self.__ongoing_fetch_events) > self.__max_ongoing_fetch_events:
-                        self.__ongoing_fetch_events.popleft().synchronize()
+                    if not self.use_hpu:
+                        while self.__ongoing_fetch_events and self.__ongoing_fetch_events[0].query():
+                            self.__ongoing_fetch_events.popleft()
+                        if len(self.__ongoing_fetch_events) > self.__max_ongoing_fetch_events:
+                            self.__ongoing_fetch_events.popleft().synchronize()
 
                     self.__inflight_param_registry.pop(param).wait()
-
-                    event = get_accelerator().Event()
-                    event.record()
-                    self.__ongoing_fetch_events.append(event)
+                    if not self.use_hpu:
+                        event = get_accelerator().Event()
+                        event.record()
+                        self.__ongoing_fetch_events.append(event)
 
             assert param.ds_status == ZeroParamStatus.AVAILABLE, param.ds_summary()
         get_accelerator().current_stream().wait_stream(self.__allgather_stream)

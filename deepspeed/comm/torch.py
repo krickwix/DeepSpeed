@@ -94,26 +94,14 @@ class TorchBackend(Backend):
 
     def init_process_group(self, backend, timeout, init_method, rank, world_size):
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend,
-                                                 timeout=timeout,
-                                                 init_method=init_method,
-                                                 rank=rank,
-                                                 world_size=world_size)
+            if backend == "hccl":
+                import habana_frameworks.torch.distributed.hccl  # noqa: F401
+            torch.distributed.init_process_group(backend, timeout=timeout, init_method=init_method)
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
     def all_reduce(self, tensor, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
         op = self._reduce_op(op)
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
-
-    def all_reduce_coalesced(self, tensors, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
-        """ proxy func to torch.distributed.all_reduce_coalesced,
-        which is included in PyTorch 1.13 and above
-        """
-        if not self.has_all_reduce_coalesced:
-            raise RuntimeError(f"Current torch version does not have all_reduce_coalesced "
-                               f"api (torch.__version__: {torch.__version__})")
-        op = self._reduce_op(op)
-        return torch.distributed.all_reduce_coalesced(tensors=tensors, op=op, group=group, async_op=async_op)
 
     def reduce(self, tensor, dst, op=ReduceOp.SUM, group=None, async_op=False):
         return torch.distributed.reduce(tensor=tensor, dst=dst, op=self._reduce_op(op), group=group, async_op=async_op)

@@ -129,7 +129,8 @@ class PipelineModule(nn.Module):
                  partition_method='parameters',
                  activation_checkpoint_interval=0,
                  activation_checkpoint_func=checkpointing.checkpoint,
-                 checkpointable_layers=None):
+                 checkpointable_layers=None,
+                 use_hpu=False):
 
         super().__init__()
 
@@ -592,7 +593,8 @@ class PipelineModule(nn.Module):
 
             sd_loader = SDLoaderFactory.get_sd_loader(model_ckpt_list,
                                                       version=2.0,
-                                                      checkpoint_engine=checkpoint_engine)
+                                                      checkpoint_engine=checkpoint_engine,
+                                                      device=get_accelerator().current_device())
             load_path, checkpoint, _ = sd_loader.load(mp_world_size, mp_rank, module_key=None, is_pipe_parallel=True)
 
             layer.load_state_dict(checkpoint)

@@ -13,6 +13,7 @@ from deepspeed import comm as dist
 from packaging.version import Version
 from deepspeed.git_version_info import torch_info
 from deepspeed.accelerator import get_accelerator
+from ..hpu_utils import get_use_hpu
 
 _groups = None
 _grid = None
@@ -49,7 +50,8 @@ def _is_valid_send_recv(src_stage, dest_stage):
 
 def send(tensor, dest_stage, async_op=False):
     global _groups
-    assert async_op == False, "Doesn't support async_op true"
+    isHpu = get_use_hpu()
+    assert isHpu == True or async_op == False, "Doesn't support async_op true"
     src_stage = _grid.get_stage_id()
     _is_valid_send_recv(src_stage, dest_stage)
 
@@ -57,7 +59,8 @@ def send(tensor, dest_stage, async_op=False):
     if async_op:
         global _async
         op = dist.isend(tensor, dest_rank)
-        _async.append(op)
+        if not isHpu:
+            _async.append(op)
     else:
 
         if can_send_recv():
@@ -70,7 +73,8 @@ def send(tensor, dest_stage, async_op=False):
 
 def recv(tensor, src_stage, async_op=False):
     global _groups
-    assert async_op == False, "Doesn't support async_op true"
+    isHpu = get_use_hpu()
+    assert isHpu == True or async_op == False, "Doesn't support async_op true"
     dest_stage = _grid.get_stage_id()
     _is_valid_send_recv(src_stage, dest_stage)
 
@@ -79,7 +83,8 @@ def recv(tensor, src_stage, async_op=False):
     if async_op:
         global _async
         op = dist.irecv(tensor, src_rank)
-        _async.append(op)
+        if not isHpu:
+            _async.append(op)
     else:
         if can_send_recv():
             return dist.recv(tensor, src_rank)

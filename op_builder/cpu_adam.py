@@ -18,10 +18,10 @@ class CPUAdamBuilder(TorchCPUOpBuilder):
         return f'deepspeed.ops.adam.{self.NAME}_op'
 
     def sources(self):
-        if self.build_for_cpu:
+        if self.use_hpu or self.build_for_cpu:
             return ['csrc/adam/cpu_adam.cpp']
-
-        return ['csrc/adam/cpu_adam.cpp', 'csrc/common/custom_cuda_kernel.cu']
+        else:
+            return ['csrc/adam/cpu_adam.cpp', 'csrc/common/custom_cuda_kernel.cu']
 
     def libraries_args(self):
         args = super().libraries_args()
@@ -35,14 +35,10 @@ class CPUAdamBuilder(TorchCPUOpBuilder):
 
     def include_paths(self):
         import torch
-        if self.build_for_cpu:
+        if self.build_for_cpu or self.use_hpu:
             CUDA_INCLUDE = []
         elif not self.is_rocm_pytorch():
             CUDA_INCLUDE = [os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
         else:
-            CUDA_INCLUDE = [
-                os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include"),
-                os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include", "rocrand"),
-                os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include", "hiprand"),
-            ]
+            CUDA_INCLUDE = []
         return ['csrc/includes'] + CUDA_INCLUDE

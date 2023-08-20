@@ -11,6 +11,7 @@ import deepspeed
 from transformers import pipeline
 from unit.common import DistributedTest
 from deepspeed.accelerator import get_accelerator
+from unit.hpu import *
 
 
 @pytest.fixture
@@ -51,15 +52,37 @@ class TestModelProfiling(DistributedTest):
         if cuda_graphs and "bert" not in model:
             pytest.skip(f"CUDA Graph not supported for {model}")
 
+        if bool(pytest.use_hpu) == True:
+            # FP16 is not supported on Gaudi1.
+            if get_hpu_dev_version() == "Gaudi":
+                pytest.skip(f"FP16 tests are not supported by Gaudi1.")
+
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         world_size = int(os.getenv("WORLD_SIZE", "1"))
-
-        pipe = pipeline(task, model, framework="pt", device=get_accelerator().device_name(local_rank))
-        pipe.model = deepspeed.init_inference(pipe.model,
-                                              dtype=dtype,
-                                              mp_size=world_size,
-                                              replace_with_kernel_inject=True,
-                                              enable_cuda_graph=cuda_graphs)
+        if bool(pytest.use_hpu) == True:
+            dev_name = f"hpu:{local_rank}"
+            pipe = pipeline(task, model, framework="pt", device=dev_name)
+            device = torch.device(f"hpu:{local_rank}")
+            pipe.device = device
+            pipe.model.to(device)
+        else:
+            pipe = pipeline(task, model, framework="pt", device=get_accelerator().device_name(local_rank))
+        if bool(pytest.use_hpu) == True:
+            import deepspeed.module_inject as module_inject
+            import habana_frameworks.torch as htorch  # noqa: F401
+            pipe.model = deepspeed.init_inference(pipe.model,
+                                                  dtype=dtype,
+                                                  mp_size=world_size,
+                                                  replace_with_kernel_inject=False,
+                                                  replace_method="auto",
+                                                  injection_policy={"BertLayer": (module_inject.HFBertLayerPolicy, )},
+                                                  enable_cuda_graph=cuda_graphs)
+        else:
+            pipe.model = deepspeed.init_inference(pipe.model,
+                                                  dtype=dtype,
+                                                  mp_size=world_size,
+                                                  replace_with_kernel_inject=True,
+                                                  enable_cuda_graph=cuda_graphs)
         pipe.model.profile_model_time(use_cuda_events=use_cuda_events)
 
         e2e_times = []
@@ -76,5 +99,8 @@ class TestModelProfiling(DistributedTest):
             e2e_times.append((end - start) / 1e6)  # convert ns to ms
             model_times.extend(pipe.model.model_times())
 
-        for e2e_t, model_t in zip(e2e_times, model_times):
-            assert e2e_t >= model_t
+        for count, (e2e_t, model_t) in enumerate(zip(e2e_times, model_times)):
+            print(f"{count=} {e2e_t=} {model_t=}", flush=True)
+
+        for count, (e2e_t, model_t) in enumerate(zip(e2e_times, model_times)):
+            assert e2e_t >= model_t, f"{count=} {e2e_t=} {model_t=}"

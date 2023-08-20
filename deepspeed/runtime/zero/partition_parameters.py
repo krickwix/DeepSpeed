@@ -22,6 +22,7 @@ from .linear import zero3_linear_wrap
 
 import deepspeed
 from ..utils import get_only_unique_item, see_memory_usage
+from ..hpu_utils import get_use_hpu
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -32,6 +33,19 @@ from deepspeed.utils.debug import (debug_param2name_id_shape, debug_param2name_i
                                    debug_param2name_id, debug_param2name_id_shape_status)
 from deepspeed.accelerator import get_accelerator
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
+
+#TODO: Remove
+if get_use_hpu():
+    global habana_frameworks
+    import habana_frameworks  # noqa: F401
+
+
+def record_stream(tensor, use_hpu, no_cuda):
+    if tensor.is_cuda:
+        # need to make sure that we don't free the parameter while it is still
+        # being used for computation
+        tensor.record_stream(get_accelerator().current_stream())
+
 
 param_count = 0
 partitioned_param_data_shape = [0]
@@ -266,13 +280,14 @@ def get_all_subclasses(cls):
 
 
 @instrument_w_nvtx
-def free_param(param: Parameter) -> None:
+def free_param(param: Parameter, use_hpu, no_cuda) -> None:
     """Free underlying storage of a parameter."""
     assert not param.ds_active_sub_modules, param.ds_summary()
     if get_accelerator().on_accelerator(param.data):
         # need to make sure that we don't free the parameter while it is still
         # being used for computation
-        param.data.record_stream(get_accelerator().current_stream())
+        #param.data.record_stream(get_accelerator().current_stream())
+        record_stream(param.data, use_hpu, no_cuda)
     # param.data doesn't store anything meaningful in partitioned state
     param.data = torch.empty(0, dtype=param.dtype, device=param.device)
     param.ds_status = ZeroParamStatus.NOT_AVAILABLE
@@ -537,34 +552,36 @@ def shutdown_init_context():
 
 class AllGatherHandle:
 
-    def __init__(self, handle, param: Parameter) -> None:
+    def __init__(self, handle, param: Parameter, use_hpu=False) -> None:
         if param.ds_status != ZeroParamStatus.INFLIGHT:
             raise RuntimeError(f"expected param {param.ds_summary()} to be available")
 
         self.handle = handle
         self.param = param
+        self.use_hpu = use_hpu
 
     def wait(self) -> None:
-        instrument_w_nvtx(self.handle.wait)()
+        if not self.use_hpu:
+            instrument_w_nvtx(self.handle.wait)()
         self.param.ds_status = ZeroParamStatus.AVAILABLE
 
 
 class AllGatherCoalescedHandle:
 
-    def __init__(
-        self,
-        allgather_handle,
-        params: List[Parameter],
-        partitions: List[Tensor],
-        world_size: int,
-    ) -> None:
-        # renaming the fields without double underscore to ease
-        # the class inheritance
+    def __init__(self,
+                 allgather_handle,
+                 params: List[Parameter],
+                 partitions: List[Tensor],
+                 world_size: int,
+                 use_hpu=False,
+                 no_cuda=False) -> None:
         self.allgather_handle = allgather_handle
         self.params = params
         self.partitions = partitions
         self.world_size = world_size
         self.complete = False
+        self.use_hpu = use_hpu
+        self.no_cuda = no_cuda
 
         for param in self.params:
             if param.ds_status != ZeroParamStatus.INFLIGHT:
@@ -575,7 +592,9 @@ class AllGatherCoalescedHandle:
         if self.complete:
             return
 
-        instrument_w_nvtx(self.allgather_handle.wait)()
+        #SW-147844 TODO: remove WA when SW-115619 is resolved
+        if not self.use_hpu:
+            instrument_w_nvtx(self.allgather_handle.wait)()
 
         # split the single tensor out into individual tensors
         param_offset = 0
@@ -592,7 +611,7 @@ class AllGatherCoalescedHandle:
             param.ds_status = ZeroParamStatus.AVAILABLE
 
             for part_to_copy in partitions:
-                part_to_copy.record_stream(get_accelerator().current_stream())
+                record_stream(part_to_copy, self.use_hpu, self.no_cuda)
 
             param_offset += param.ds_tensor.ds_numel
 
@@ -631,7 +650,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                  config=None,
                  enabled=True,
                  dtype=None,
-                 mpu=None):
+                 mpu=None,
+                 use_hpu=None,
+                 no_cuda=False):
         """A context to enable massive model construction for training with
         ZeRO-3. Models are automatically partitioned (or, sharded) across the
         system and converted to half precision.
@@ -736,24 +757,34 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 f'zero.Init: the `config` argument is deprecated. Please use `config_dict_or_path` instead.')
         _ds_config = deepspeed.runtime.config.DeepSpeedConfig(config_dict_or_path,
                                                               mpu) if config_dict_or_path is not None else None
-        if _ds_config is not None:
-            mem_efficient_linear = _ds_config.zero_config.memory_efficient_linear
         super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear, ds_config=_ds_config, dtype=dtype)
+        if use_hpu == None:
+            self.use_hpu = get_use_hpu()
+        else:
+            self.use_hpu = use_hpu
         if not dist.is_initialized():
-            init_distributed()
+            if self.use_hpu:
+                init_distributed(dist_backend="hccl")
+            else:
+                init_distributed()
             assert dist.is_initialized(), "Parameters cannot be scattered without initializing deepspeed.comm"
         if data_parallel_group is None:
             self.ds_process_group = dist.get_world_group()
         else:
             self.ds_process_group = data_parallel_group
 
+        self.no_cuda = no_cuda
         self.rank = dist.get_rank(group=self.ds_process_group)
         self.dp_world_size = dist.get_world_size(group=self.ds_process_group)
 
         # Local device is the device where the parameters are consumed, must be default device.
         # It is the device where parameters are fully instantiated using allgather
-        self.local_device = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
-        get_accelerator().set_device(self.local_device)
+        # todo SW-143933 remove the below HPU wa for torch.device initialization, ticket SW-143931 has to be solved.
+        if get_accelerator().device_name() == "hpu":
+            self.local_device = torch.device("hpu")
+        else:
+            self.local_device = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
+            get_accelerator().set_device(self.local_device)
 
         if _ds_config is not None:
             self._update_persist_config(_ds_config)
@@ -933,9 +964,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     requires_grad=False,
                 )
                 handle = _dist_allgather_fn(param.ds_tensor.to(get_accelerator().current_device_name()), param_buffer,
-                                            self.get_partition_dp_group(param))
+                                            self.ds_process_group)
                 param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                return AllGatherHandle(handle, param)
+                return AllGatherHandle(handle, param, use_hpu=self.use_hpu)
             else:
                 partition_sz = sum(p.ds_tensor.ds_numel for p in params)
                 flat_tensor = torch.empty(partition_sz * self.num_partitions,
@@ -945,18 +976,16 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 partitions: List[Parameter] = []
                 for i in range(self.num_partitions):
                     partitions.append(flat_tensor.narrow(0, partition_sz * i, partition_sz))
-
                 instrument_w_nvtx(torch.cat)([p.ds_tensor.to(get_accelerator().current_device_name()) for p in params],
-                                             out=partitions[self.get_partition_rank()])
-                handle = _dist_allgather_fn(partitions[self.get_partition_rank()], flat_tensor,
-                                            self.get_partition_dp_group(params[0]))
+                                             out=partitions[self.rank])
+                handle = _dist_allgather_fn(partitions[self.rank], flat_tensor, self.ds_process_group)
 
-                return AllGatherCoalescedHandle(
-                    allgather_handle=handle,
-                    params=params,
-                    partitions=partitions,
-                    world_size=self.num_partitions,
-                )
+                return AllGatherCoalescedHandle(allgather_handle=handle,
+                                                params=params,
+                                                partitions=partitions,
+                                                world_size=self.num_partitions,
+                                                use_hpu=self.use_hpu,
+                                                no_cuda=self.no_cuda)
 
         def partition(param_list=None, hierarchy=0, has_been_updated=False):
             cls = param
@@ -1134,7 +1163,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
                 see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
                 # param.data does not store anything meaningful in partitioned state
-                free_param(param)
+                free_param(param, self.use_hpu, self.no_cuda)
                 see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}', force=False)
 
                 if param.ds_tensor.final_location == OffloadDeviceEnum.nvme:
@@ -1205,7 +1234,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             # param.data does not store anything meaningful in partitioned state
 
             see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
-            free_param(param)
+            free_param(param, self.use_hpu, self.no_cuda)
             see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}', force=False)
 
             if param.ds_tensor.final_location == OffloadDeviceEnum.nvme:
@@ -1245,7 +1274,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             f'After allocate allgather param {debug_param2name_id_shape_status(param)} {aligned_param_size} {partition_size} ',
             force=False)
 
-        get_accelerator().synchronize()
+        if not self.use_hpu:
+            get_accelerator().synchronize()
 
         print_rank_0(
             f"{'--'* hierarchy}----allgather param with {debug_param2name_id_shape_status(param)} partition size={partition_size}"
@@ -1339,7 +1369,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             param.data = gathered_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape).data
 
         # guarantee the communication to be completed
-        get_accelerator().synchronize()
+        if not self.use_hpu:
+            get_accelerator().synchronize()
 
         return None
 

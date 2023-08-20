@@ -11,6 +11,11 @@ from deepspeed.ops.op_builder import InferenceBuilder
 from .inference_test_utils import get_dtypes
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
+    pytestmark = pytest.mark.skip(reason="Inference ops are not available on this system")
+
+pytestmark = pytest.mark.skipif(((bool(pytest.use_hpu) == True)), reason="Inference ops are not supported by HPU.")
+
+if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 TOLERANCES = None

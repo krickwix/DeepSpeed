@@ -14,7 +14,9 @@ from deepspeed.ops.op_builder import CPUAdagradBuilder
 from unit.common import DistributedTest
 
 if not deepspeed.ops.__compatible_ops__[CPUAdagradBuilder.NAME]:
-    pytest.skip("cpu-adagrad is not compatible", allow_module_level=True)
+    pytestmark = pytest.mark.skip(reason="cpu-adagrad is not compatible")
+
+pytestmark = pytest.mark.skipif(bool(pytest.use_hpu) == True, reason="DeepSpeed CPUAdagrad is not Supported by HPU")
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):

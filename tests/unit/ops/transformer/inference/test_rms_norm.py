@@ -12,7 +12,8 @@ from .inference_test_utils import allclose, get_dtypes
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
-
+if bool(pytest.use_hpu) == True:
+    pytest.skip("DeepSpeed's implementation of the inference kernel does not support HPU.", allow_module_level=True)
 inference_module = None
 
 

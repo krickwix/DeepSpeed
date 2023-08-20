@@ -6,6 +6,7 @@
 import os
 import json
 import argparse
+import pytest
 import torch
 
 from deepspeed.pipe import PipelineModule, LayerSpec
@@ -175,8 +176,10 @@ class LinearStackPipe(PipelineModule):
             layers.append(LayerSpec(torch.nn.Linear, self.hidden_dim, self.hidden_dim, bias=False))
             layers.append(lambda x: x)
         layers.append(LayerSpec(torch.nn.Linear, self.hidden_dim, self.output_dim))
-
-        super().__init__(layers=layers, loss_fn=torch.nn.CrossEntropyLoss(), **kwargs)
+        super().__init__(layers=layers,
+                         loss_fn=torch.nn.CrossEntropyLoss(),
+                         use_hpu=(bool(pytest.use_hpu) == True),
+                         **kwargs)
 
 
 class SimpleOptimizer(torch.optim.Optimizer):

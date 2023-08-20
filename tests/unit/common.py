@@ -19,12 +19,13 @@ from torch.multiprocessing import Process
 import pytest
 from _pytest.outcomes import Skipped
 from _pytest.fixtures import FixtureLookupError, FixtureFunctionMarker
+from unit.hpu import *
 
 # Worker timeout *after* the first worker has completed.
 DEEPSPEED_UNIT_WORKER_TIMEOUT = 120
 
 # Worker timeout for tests that hang
-DEEPSPEED_TEST_TIMEOUT = 600
+DEEPSPEED_TEST_TIMEOUT = int(os.environ.get('DEEPSPEED_TEST_TIMEOUT', '600'))
 
 
 def get_xdist_worker_id():
@@ -44,6 +45,10 @@ def get_master_port():
 
 
 def set_accelerator_visible():
+    # below function relevant for GPU
+    if bool(pytest.use_hpu) == True:
+        return
+
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
     xdist_worker_id = get_xdist_worker_id()
     if xdist_worker_id is None:
@@ -69,6 +74,9 @@ def set_accelerator_visible():
                 match = re.search('Device Type.*GPU', line)
                 if match:
                     num_accelerators += 1
+        elif bool(pytest.use_hpu) == True:
+            hl_smi = subprocess.check_output(['hl-smi', '-Q', 'index', '--format=csv'])
+            num_accelerators = len(hl_smi.decode('utf-8').strip().split('\n')) - 1
         else:
             assert get_accelerator().device_name() == 'cpu'
             cpu_sockets = int(
@@ -136,8 +144,14 @@ class DistributedExec(ABC):
         mp.set_start_method('forkserver', force=True)
         skip_msg = mp.Queue()  # Allows forked processes to share pytest.skip reason
         processes = []
+        if bool(pytest.use_hpu) == True:
+            enable_hpu(True)
+        else:
+            enable_hpu(False)
+        mp.set_forkserver_preload(['unit.enable_hpu'])
         for local_rank in range(num_procs):
-            p = Process(target=self._dist_init, args=(local_rank, num_procs, skip_msg))
+            p = Process(target=self._dist_init,
+                        args=(local_rank, num_procs, skip_msg, bool(pytest.use_hpu), pytest.hpu_dev))
             p.start()
             processes.append(p)
 
@@ -178,8 +192,10 @@ class DistributedExec(ABC):
             # add a check here to assert all exit messages are equal
             pytest.skip(skip_msg.get())
 
-    def _dist_init(self, local_rank, num_procs, skip_msg):
+    def _dist_init(self, local_rank, num_procs, skip_msg, use_hpu, hpu_dev):
         """Initialize deepspeed.comm and execute the user function. """
+        pytest.use_hpu = bool(use_hpu)
+        pytest.hpu_dev = hpu_dev
         if self.set_dist_env:
             os.environ['MASTER_ADDR'] = '127.0.0.1'
             os.environ['MASTER_PORT'] = get_master_port()
@@ -193,7 +209,6 @@ class DistributedExec(ABC):
 
         if get_accelerator().is_available():
             set_accelerator_visible()
-
         if self.init_distributed:
             deepspeed.init_distributed(dist_backend=self.backend)
             dist.barrier()
@@ -212,6 +227,9 @@ class DistributedExec(ABC):
         if self.init_distributed or dist.is_initialized():
             # make sure all ranks finish at the same time
             dist.barrier()
+            # TODO SW-136999: need to remove the below WA
+            if int(os.getenv("TEST_WAIT_AFTER_BARRIER", 0)) == 1:
+                time.sleep(0.5)
             # tear down after test completes
             dist.destroy_process_group()
 
