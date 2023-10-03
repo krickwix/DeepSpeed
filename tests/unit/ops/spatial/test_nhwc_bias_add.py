@@ -8,6 +8,9 @@ import torch
 from deepspeed.ops.transformer.inference.bias_add import nhwc_bias_add
 from deepspeed.accelerator import get_accelerator
 
+pytestmark = pytest.mark.skipif(((bool(pytest.use_hpu) == True)),
+                                reason="Spatial Inference ops are not supported by HPU.")
+
 
 def allclose(x, y):
     assert x.dtype == y.dtype

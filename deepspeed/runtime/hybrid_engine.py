@@ -87,7 +87,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             policy=policy,
             config=DeepSpeedInferenceConfig(
                 set_empty_params=True,
-                dtype=torch.float16 if self._config.fp16_enabled else torch.float32,
+                dtype=torch.float16
+                if self._config.fp16_enabled else torch.bfloat16 if self._config.bfloat16_enabled else torch.float32,
                 max_out_tokens=self._config.hybrid_engine.max_out_tokens,
                 min_out_tokens=self._config.hybrid_engine.max_out_tokens,
                 transposed_mode=True,

@@ -13,6 +13,7 @@ from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader, S
 from unit.util import required_torch_version
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import CPUAdamBuilder
+from unit.hpu import *
 
 try:
     from apex import amp  # noqa: F401
@@ -38,6 +39,10 @@ class TestLambFP32GradClip(DistributedTest):
             "gradient_clipping": 1.0
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -71,6 +76,10 @@ class TestLambFP16(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -96,6 +105,10 @@ class TestLambFP16(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim, empty_grad=True)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -125,6 +138,10 @@ class TestAdamFP32EmptyGrad(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim, empty_grad=True)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -146,6 +163,10 @@ class TestAdamwFP16Basic(DistributedTest):
         config_dict = {"train_batch_size": 1, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 10
 
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
         model = SimpleModel(hidden_dim)
         optimizer = torch.optim.AdamW(params=model.parameters())
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
@@ -165,6 +186,11 @@ class TestFP16OptimizerForMoE(DistributedTest):
 
         config_dict = {"train_batch_size": 2, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 10
+
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         def mock_unscale_and_clip_grads(total_norm, apply_scale=True):
             torch_norm_tensor = get_accelerator().FloatTensor([total_norm])
@@ -193,6 +219,11 @@ class TestFP16OptimizerForMoE(DistributedTest):
 
         config_dict = {"train_batch_size": 2, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 10
+
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         def mock_unscale_and_clip_grads(grads_groups_flat, total_norm, apply_scale=True):
             torch_norm_tensor = get_accelerator().FloatTensor([total_norm])
@@ -236,6 +267,11 @@ class TestFP16OptimizerForMoE(DistributedTest):
         }
         hidden_dim = 10
 
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
+
         def mock_unscale_and_clip_grads(total_norm, apply_scale=True):
             torch_norm_tensor = get_accelerator().FloatTensor([total_norm])
             all_gather_results = [torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())]
@@ -264,6 +300,10 @@ class TestAdamwFP16EmptyGrad(DistributedTest):
     def test(self):
         config_dict = {"train_batch_size": 1, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         optimizer = torch.optim.AdamW(params=model.parameters())
@@ -317,6 +357,10 @@ class TestAdamFP16ZeroOneCycleCompatibility(DistributedTest):
         }
         hidden_dim = 10
 
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
         data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
@@ -355,6 +399,10 @@ class TestZeroStaticScale(DistributedTest):
             }
         }
 
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
         model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
 
@@ -394,6 +442,10 @@ class TestZeroAllowUntestedOptimizer(DistributedTest):
         }
         hidden_dim = 10
 
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
         model = SimpleModel(hidden_dim)
         optimizer = SimpleOptimizer(model.parameters())
         with pytest.raises(AssertionError):
@@ -436,6 +488,10 @@ class TestZeroEmptyPartition(DistributedTest):
             }
         }
         hidden_dim = 1
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
         model = SimpleModel(hidden_dim)
 
         # Ensure model has 2 parameters, to cause empty partition with DP=3
@@ -457,6 +513,10 @@ class TestAmp(DistributedTest):
     def test_adam_basic(self):
         config_dict = {"train_batch_size": 2, "steps_per_print": 1, "amp": {"enabled": True}}
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         optimizer = torch.optim.Adam(params=model.parameters())
@@ -483,6 +543,10 @@ class TestAmp(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -509,6 +573,10 @@ class TestAmp(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -535,6 +603,10 @@ class TestAmp(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -562,6 +634,10 @@ class TestZeroSupportedClientOptimizer(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         client_optimizer = optimizer_constructor(params=model.parameters())
@@ -595,6 +671,10 @@ class TestZero2ReduceScatterOff(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -627,6 +707,10 @@ class TestFP16AdamTypes(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -661,6 +745,10 @@ class TestZero3LazyScatter(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
@@ -689,6 +777,10 @@ class TestZeroEmptyGrad(DistributedTest):
             }
         }
         hidden_dim = 10
+        if bool(pytest.use_hpu) == True:
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         model = SimpleModel(hidden_dim)
         optimizer = torch.optim.Adam(model.parameters())

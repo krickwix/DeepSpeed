@@ -27,6 +27,8 @@ from ..module_inject.policy import TransformerPolicy
 from ..module_inject.auto_tp import AutoTP
 
 from ..module_inject.replace_policy import generic_policies
+from ..runtime.hpu_utils import get_use_hpu
+from ..runtime.utils import torch_check_hpu_fp16_supported
 
 DS_INFERENCE_ENABLED = False
 from torch import nn
@@ -114,6 +116,14 @@ class InferenceEngine(Module):
         if hasattr(self.module, "config"):
             TransformerPolicy.hf_model_config = self.module.config
 
+        self.use_hpu = get_use_hpu()
+        if self.use_hpu:
+            self.fp16_supported = torch_check_hpu_fp16_supported()
+        else:
+            self.fp16_supported = True
+        if config.dtype == torch.half and not self.fp16_supported:
+            raise ValueError("Type fp16 is not supported.")
+
         # todo: keep this self.injection_dict because we don't use to change config.injection_policy API
         # todo: this will get changed when Molly's PR on auto injection dict is merged
         self.injection_dict = config.injection_policy
@@ -155,6 +165,10 @@ class InferenceEngine(Module):
         # kernel injection must be enabled.
         # NOTE: This check assumes a Hugging Face hierarchy for the device type i.e. module.device.type
         self.model_meta_device = self.module.device.type == 'meta' if hasattr(self.module, "device") else False
+        #TODO:[SW-111289] This fails for bigger models that don't fit in host memory and use 'meta' device
+        # It needs to be investigated why that code path was disabled
+        # if config.checkpoint and not config.replace_with_kernel_inject:
+        #     self._load_checkpoint(config.checkpoint)
 
         # convert model to intended dtype
         if config.dtype:
@@ -175,7 +189,12 @@ class InferenceEngine(Module):
         if moe and dist.get_world_size() > 1:
             self._create_ep_parallel_group(config.moe.moe_experts)
 
-        # We only support three modes: 1) user specified policy for tensor-parallelism, 2) kernel injection (replace_with_kernel_inject), and 3) automatic tensor parallelism if tp_size > 1.
+        # retain this from the old conditional argument being passed to apply_injection_policy()
+        # comment out this to load checkpoint as part of _apply_injection_policy
+        # if not config.replace_with_kernel_inject:
+        #     config.checkpoint = None
+
+        # We only support three modes: 1) user specified policy for tensor-parallelism, 2) kernel injection (replace_with_kernel_inject), and 3) automatic tensor parallelism.
         if self.injection_dict:
             # 1. User specified Tensor Parallelism
             assert not config.replace_with_kernel_inject, "Cannot use both user specified injection policy and kernel injection"
@@ -202,14 +221,20 @@ class InferenceEngine(Module):
                     self._apply_injection_policy(config, client_module)
 
         device = get_accelerator().current_device_name()
-        self.module.to(device)
+
+        #TODO:[SW-111292] Not needed as replacing already puts the tensors on the right device
+        if config.checkpoint == None or get_accelerator().device_name() != 'hpu':
+            self.module.to(device)
 
         if config.tensor_parallel.tp_size > 1:
             _rng_state = get_accelerator().get_rng_state().to(get_accelerator().current_device_name())
             dist.broadcast(_rng_state, 0)
             get_accelerator().set_rng_state(_rng_state.cpu())
 
-        if config.tensor_parallel.tp_size > 1:
+        if config.enable_cuda_graph and get_accelerator().device_name() == 'hpu':
+            import habana_frameworks.torch as ht
+            self.module = ht.hpu.wrap_in_hpu_graph(self.module)
+        elif config.tensor_parallel.tp_size > 1:
             assert not config.enable_cuda_graph, "Cuda graph is not supported for model parallelism"
 
         # Check if local CUDA graphs can be created in replacement modules
@@ -227,7 +252,7 @@ class InferenceEngine(Module):
     # todo: remove this once all the config dicts are centralized from top level pydantic config
     def _get_model_config_generate(self, config):
         # this is being passed to replace_transformer_layer(config=self.user_model_config_dict)
-        self.config = getattr(self.module, 'config', None) if config.config is None else config.config
+        self.config = getattr(self.module, 'config', None)  #if config.config is None else config.config
 
     def remove_mask_prepare_for_bloom(self):
         if hasattr(self.module, 'transformer'):
@@ -326,7 +351,7 @@ class InferenceEngine(Module):
         if self._config.checkpoint is not None and not isinstance(self._config.checkpoint, (str, dict)):
             raise ValueError(f"checkpoint must be None, str or dict, got {type(self._config.checkpoint)}")
 
-        supported_dtypes = [None, torch.half, torch.int8, torch.float]
+        supported_dtypes = [None, torch.half, torch.int8, torch.float, torch.bfloat16]
         if self._config.dtype not in supported_dtypes:
             raise ValueError(f"{self._config.dtype} not supported, valid dtype: {supported_dtypes}")
 
@@ -413,8 +438,9 @@ class InferenceEngine(Module):
     def _apply_injection_policy(self, config, client_module=None):
         # client_module is only passed when using the injection_dict method.
         checkpoint_dir = config.checkpoint
-        checkpoint = SDLoaderFactory.get_sd_loader_json(checkpoint_dir,
-                                                        self.checkpoint_engine) if checkpoint_dir is not None else None
+        checkpoint = SDLoaderFactory.get_sd_loader_json(checkpoint_dir, self.checkpoint_engine,
+                                                        device=self.module.device) \
+                                                        if checkpoint_dir is not None else None
 
         generic_injection(self.module,
                           fp16=(config.dtype == torch.half) or (config.dtype == torch.int8),
@@ -458,9 +484,9 @@ class InferenceEngine(Module):
                         tag = fd.read().strip()
 
             ckpt_list = self._get_all_ckpt_names(load_dir, tag)
-            sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, self.checkpoint_engine)
+            sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, self.checkpoint_engine, device=self.module.device)
         else:
-            sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir, self.checkpoint_engine)
+            sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir, self.checkpoint_engine, device=self.module.device)
 
         checkpoint = sd_loader['checkpoints']
 
@@ -597,7 +623,8 @@ class InferenceEngine(Module):
             **kwargs: variable length keyword arguments
         """
         start = None
-        if self.model_profile_enabled and get_accelerator().device_name() == 'cuda' and self._config.enable_cuda_graph:
+        if self.model_profile_enabled and (get_accelerator().device_name() == 'cuda' or self.use_hpu) and \
+           self._config.enable_cuda_graph:
             get_accelerator().synchronize()
             start = time.time()
 

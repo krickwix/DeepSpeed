@@ -28,6 +28,13 @@ from .utils import policy_to_ds_container
 import gc
 
 
+def move(tensor, device):
+    if tensor.is_meta:
+        return torch.empty_like(tensor, device=device)
+    else:
+        return tensor.to(device=device)
+
+
 class ReplaceWithTensorSlicing:
 
     def __init__(self, mp_group=None, mp_size=1, out_dim=1, in_dim=0):
@@ -90,10 +97,12 @@ class ReplaceWithTensorSlicing:
             dst.scale = src.scale
         return dst
 
+    #TODO:[SW-148890] revert WA changes in method once all the issues are fixed. (dst=src assignments, reshapes, move for meta)
     def copy(self, dst, src, int8=False, allocate_tensor=False):
         if src is None:
             return src
-        assert not dst.data.is_meta  # the torch.Tensor.copy_ method used below will silently fail on meta tensors
+        # we allow meta tensor. so comment out the assert below.
+        # assert not dst.data.is_meta  # the torch.Tensor.copy_ method used below will silently fail on meta tensors
         if allocate_tensor:
             dst = torch.empty_like(dst)
         outer_dim = 0 if int8 else 1
@@ -103,21 +112,26 @@ class ReplaceWithTensorSlicing:
         if (len(src_shape) == 2 and len(dst_shape) == 2):
 
             if src_shape[inner_dim] == dst_shape[self.in_dim] and src_shape[outer_dim] == dst_shape[self.out_dim]:
-                dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
+                # avoid reshapes cause memory issues
+                dst.data.copy_(src)
             else:
                 if src_shape[inner_dim] != dst_shape[self.in_dim]:
                     self.merge_assert(src_shape[inner_dim], dst_shape[self.in_dim])
                     dst.data.copy_(src[:, self.gpu_index * dst_shape[self.in_dim]: (self.gpu_index + 1) * dst_shape[self.in_dim]] if inner_dim == 1 else \
-                                   src[self.gpu_index * dst_shape[self.in_dim]: (self.gpu_index + 1) * dst_shape[self.in_dim], :])
+                                src[self.gpu_index * dst_shape[self.in_dim]: (self.gpu_index + 1) * dst_shape[self.in_dim], :])
                 else:
                     self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
                     dst.data.copy_(src[:, self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim]] if outer_dim == 1 else \
-                                   src[self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim], :])
+                                src[self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim], :])
         else:
             if src_shape[0] == dst_shape[0]:
-                dst = src if src.dtype == dst.dtype else dst.data.copy_(src)
+                # avoid using direct assisment dst = src
+                # it causes accuracy issue, and is incorrect as the data does not get copied to the device.
+                dst.data.copy_(src)
             else:
                 dst.data.copy_(src[self.gpu_index * dst_shape[-1]:(self.gpu_index + 1) * dst_shape[-1]])
+        # use move() to support meta tensors.
+        dst = move(dst, get_accelerator().current_device_name())
         dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
         if hasattr(src, 'scale'):
             dst.scale = src.scale
@@ -388,7 +402,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                     new_bias.data.copy_(child.bias.data)
                 setattr(child, "replaced", True)
                 return LinearAllreduce(data, child.bias if child.bias is None else \
-                            torch.nn.parameter.Parameter(new_bias.to(get_accelerator().current_device_name())), mp_group)
+                            torch.nn.parameter.Parameter(move(new_bias, get_accelerator().current_device_name()) ), mp_group)
             else:
                 new_weight = torch.empty((
                     (weight_shape[1] if conv_linear_layer else weight_shape[0]) // mp_size,
@@ -403,8 +417,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                 new_bias = torch.empty((weight_shape[0] // mp_size),
                                        device=child.weight.device,
                                        dtype=child.weight.dtype)
-                bias_data = None if child.bias is None else mp_replace.copy(new_bias, child.bias.data).to(
-                    get_accelerator().current_device_name())
+                bias_data = None if child.bias is None else move(mp_replace.copy(new_bias, child.bias.data),
+                                                                 get_accelerator().current_device_name())
                 setattr(child, "replaced", True)
                 return LinearLayer(weight=data.to(get_accelerator().current_device_name()), bias=bias_data)
 
@@ -458,6 +472,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                 assert child.hidden_size % mp_size == 0, "hidden_size ({}) must be divisible by mp_size ({})".format(
                     child.hidden_size, mp_size)
                 child.hidden_size = child.hidden_size // mp_size
+            if hasattr(child, 'num_key_value_heads'):
+                assert child.num_key_value_heads % mp_size == 0, "num_key_value_heads ({}) must be divisible by mp_size ({})".format(
+                    child.num_key_value_heads, mp_size)
+                child.num_key_value_heads = child.num_key_value_heads // mp_size
             setattr(child, "replaced", True)
 
         conv_linear_layer = False
@@ -485,7 +503,12 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                 else:
                     class_name = prev_class_name + '.' + prev_name
                 checking_key = prefix + '.' + class_name + '.' + name + '.' if class_name != "" else prefix + '.' + name + '.'
-                if child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm] and state_dict != None:
+                try:
+                    import transformers
+                    LlamaRMSNorm = transformers.models.llama.modeling_llama.LlamaRMSNorm
+                except:
+                    LlamaRMSNorm = None
+                if child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm, LlamaRMSNorm] and state_dict != None:
                     if any(checking_key in item for item in state_dict):
                         load(child, state_dict, checking_key, mp_group)
                     else:
@@ -521,7 +544,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         return new_module
 
-    if checkpoint_dict != None and not config.replace_with_kernel_inject:
+    #TODO:[SW-148847] check new flow of loading checkpoint for AutoTP
+    if False and checkpoint_dict != None and not config.replace_with_kernel_inject:
         # AutoTP shard loading
         checkpoint = checkpoint_dict["checkpoints"]
         pbar = tqdm.tqdm(total=len(checkpoint), desc=f"Loading {len(checkpoint)} checkpoint shards")
@@ -542,9 +566,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
     quantizer = GroupQuantizer(q_int8=quantize)
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
-    if checkpoint_dict is not None and config.replace_with_kernel_inject:
-        assert container_g.ckpt_load_enabled, \
-               f"Meta Tensor checkpoint loading not supported in {container_g.__class__.__name__} container"
+    if checkpoint_dict is not None:
+        if (get_accelerator().device_name() != "hpu"):
+            assert container_g.ckpt_load_enabled, \
+                   f"Meta Tensor checkpoint loading not supported in {container_g.__class__.__name__} container"
         start_time = time.time()
         checkpoint = checkpoint_dict['checkpoints']
         ckpt_list = checkpoint["tp"] if type(checkpoint) is dict else checkpoint
@@ -831,7 +856,12 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
         OPTLearnedPositionalEmbedding = transformers.models.opt.modeling_opt.OPTLearnedPositionalEmbedding
     except:
         OPTLearnedPositionalEmbedding = None
-    load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm, OPTLearnedPositionalEmbedding]
+    try:
+        import transformers
+        LlamaRMSNorm = transformers.models.llama.modeling_llama.LlamaRMSNorm
+    except:
+        LlamaRMSNorm = None
+    load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm, OPTLearnedPositionalEmbedding, LlamaRMSNorm]
     for name, child in model.named_children():
         if child.__class__ in policies:
             replaced_module = policies[child.__class__][0](child,

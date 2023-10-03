@@ -22,6 +22,7 @@ ZeRO optimization should be enabled as:
     "stage3_max_reuse_distance" : 1000000000,
     "allgather_partitions": [true|false],
     "allgather_bucket_size": 500000000,
+    "max_group_size": 4e9,
     "reduce_scatter": [true|false],
     "contiguous_gradients" : [true|false]
     "overlap_comm": [true|false],
@@ -35,7 +36,11 @@ ZeRO optimization should be enabled as:
     "offload_optimizer": {...},
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
-    "memory_efficient_linear": [true|false]
+    "zero_hpz_partition_size": 1,
+    "zero_quantized_weights": [true|false],
+    "zero_quantized_gradients": [true|false],
+    "memory_efficient_linear": [true|false],
+    "override_module_apply": [true|false],
     }
 }
 """
@@ -48,6 +53,7 @@ def read_zero_config_deprecated(param_dict):
     zero_config_dict["stage"] = 1 if param_dict[ZERO_OPTIMIZATION] else 0
     if zero_config_dict["stage"] > 0:
         zero_config_dict["allgather_bucket_size"] = get_scalar_param(param_dict, "allgather_size", 5e8)
+        zero_config_dict["max_group_size"] = get_scalar_param(param_dict, "max_group_size", 4e9)
     logger.warning(
         "DeepSpeedConfig: this format of ZeRO optimization setup is deprecated. Please use the following format: {}".
         format(ZERO_FORMAT))
@@ -119,6 +125,9 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Attempts to overlap the reduction of the gradients with backward computation
     """
 
+    # TODO SW-97921: remove this WA code when SW-97305 is resolved
+    max_group_size: int = Field(4e9, ge=0)
+
     load_from_fp32_weights: bool = True
     """
     Boolean indicating whether to initialize fp32 master weights from fp32
@@ -184,7 +193,10 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     ZeRO3-Offload, ZeRO-Infinity, and ZeRO-Inference.
     """
 
-    param_persistence_threshold: int = Field(pp_int(1e5), ge=0, alias="stage3_param_persistence_threshold")
+    #WA for SW-148986. Set param_persistence_threshold to 0 for zero inf
+    param_persistence_threshold: int = Field(
+        None, alias="stage3_param_persistence_threshold"
+    )  # None for dynamic default value (see validator `param_persistence_threshold_valid` below)
     """
     Do not partition parameters smaller than this threshold. Smaller values use
     less memory, but can greatly increase communication (especially
@@ -248,13 +260,38 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Performance benefit grows with gradient accumulation steps (more copying
     between optimizer steps) or GPU count (increased parallelism).
     """
+    zero_hpz_partition_size: int = Field(1, ge=0)
+    """
+    Number of ranks in zero parameters partitioning secondary group
+    """
+    zero_quantized_weights: bool = False
+    """
+    Boolean indicating whether to quantized zero parameters (weights)
+    for efficient all_gather comm
+    """
+    zero_quantized_gradients: bool = False
+    """
+    Boolean indicating whether to use quantized zero gradients
+    for efficient all_2_all_reduce comm
+    """
 
     mics_shard_size: int = Field(-1, new_param="mics_shard_size")
 
     mics_hierarchical_params_gather: bool = False
+
     memory_efficient_linear: bool = True
     """
     Use memory efficient linear implementation, for Stage 3.
+    """
+
+    force_overflow_check: bool = False
+    """
+    Force checking for inf or nan values in grads every optimizer step.
+    """
+
+    override_module_apply: bool = True
+    """
+    Override nn.Module apply function, for Stage 3.
     """
 
     # Validators
@@ -263,4 +300,15 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
         if field_value is None:
             assert ("stage" in values), "DeepSpeedZeroConfig: 'stage' must be defined before 'overlap_comm'"
             field_value = values["stage"] == ZeroStageEnum.weights
+        return field_value
+
+    @validator("param_persistence_threshold")
+    def param_persistence_threshold_valid(cls, field_value, values):
+        if field_value is None:
+            assert (
+                "offload_param"
+                in values), "DeepSpeedZeroConfig: 'offload_param' must be defined before 'param_persistence_threshold'"
+            field_value = pp_int(1e5)
+            if values["offload_param"] is not None and values["offload_param"].device != OffloadDeviceEnum.none:
+                field_value = 0
         return field_value

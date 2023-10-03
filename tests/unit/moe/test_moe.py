@@ -6,9 +6,11 @@
 import torch
 import deepspeed
 import pytest
+import os
 from unit.common import DistributedTest
 from unit.simple_model import SimplePRMoEModel, SimpleMoEModel, sequence_dataloader
 from unit.util import required_torch_version
+from unit.hpu import *
 
 
 @pytest.mark.parametrize("ep_size", [2, 4])
@@ -22,6 +24,15 @@ class TestMoE(DistributedTest):
 
         config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 16
+        dtype = torch.half
+        if bool(pytest.use_hpu) == True:
+            if os.getenv("REPLACE_FP16", default=None):
+                config_dict["fp16"]["enabled"] = False
+                config_dict["bf16"] = {"enabled": True}
+                dtype = torch.bfloat16
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         # E+D -- ep_size = 2
         # E only -- ep_size = 4
@@ -33,7 +44,11 @@ class TestMoE(DistributedTest):
                                               dist_init_required=False)
         #dist_init_required=False -- parameterize to True/False?
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=dtype)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -51,6 +66,15 @@ class TestPRMoE(DistributedTest):
 
         config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 16
+        dtype = torch.half
+        if bool(pytest.use_hpu) == True:
+            if os.getenv("REPLACE_FP16", default=None):
+                config_dict["fp16"]["enabled"] = False
+                config_dict["bf16"] = {"enabled": True}
+                dtype = torch.bfloat16
+            hpu_flag, msg = is_hpu_supported(config_dict)
+            if not hpu_flag:
+                pytest.skip(msg)
 
         # E+D -- ep_size = 2
         # E only -- ep_size = 4
@@ -61,7 +85,11 @@ class TestPRMoE(DistributedTest):
                                               optimizer=optimizer,
                                               dist_init_required=False)
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=dtype)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])

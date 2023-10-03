@@ -36,10 +36,13 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                  verbose=True,
                  mpu=None,
                  clip_grad=0.0,
-                 fused_lamb_legacy=False):
+                 fused_lamb_legacy=False,
+                 use_hpu=False):
 
         self.fused_lamb_legacy = fused_lamb_legacy
         self._global_grad_norm = 0.
+
+        self.use_hpu = use_hpu
 
         if dist.get_rank() == 0:
             logger.info(f'Fused Lamb Legacy : {self.fused_lamb_legacy} ')

@@ -21,6 +21,13 @@ typedef __half ds_half_precision_t;
 #else
 #include <cmath>
 typedef unsigned short ds_half_precision_t;
+
+#if defined(USE_HPU)
+#include <torch/torch.h>
+#define ds_half_precision_t at::BFloat16
+#endif
+#include <unistd.h>
+
 #endif
 
 #define STEP(SPAN)                                             \
@@ -234,6 +241,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
             simd_store<span>(_exp_avg + i, momentum_4, false);
             simd_store<span>(_exp_avg_sq + i, variance_4, false);
         }
+// Params are updated only in case of float16, which is currently not supported on HPU
 #if defined(__ENABLE_CUDA__)
         if (dev_params) {
             if (half_precision)
