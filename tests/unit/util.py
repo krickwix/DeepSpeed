@@ -13,6 +13,8 @@ def skip_on_arch(min_arch=7):
     if deepspeed.accelerator.get_accelerator().device_name() == 'cuda':
         if torch.cuda.get_device_capability()[0] < min_arch:  #ignore-cuda
             pytest.skip(f"needs higher compute capability than {min_arch}")
+    elif deepspeed.accelerator.get_accelerator().device_name() == 'hpu':
+        return
     else:
         assert deepspeed.accelerator.get_accelerator().device_name() == 'xpu'
         return
@@ -33,7 +35,8 @@ def skip_on_cuda(valid_cuda):
 def required_torch_version():
     TORCH_MAJOR = int(torch.__version__.split('.')[0])
     TORCH_MINOR = int(torch.__version__.split('.')[1])
-
+    if TORCH_MAJOR >= 2:
+        return True
     if TORCH_MAJOR >= 1 and TORCH_MINOR >= 8:
         return True
     else:

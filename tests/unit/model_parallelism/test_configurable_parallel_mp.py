@@ -20,6 +20,9 @@ pytestmark = pytest.mark.skipif(not required_minimum_torch_version(major_version
 pytestmark = pytest.mark.skipif(not required_maximum_torch_version(major_version=1, minor_version=13),
                                 reason='Megatron-LM package requires Pytorch version 1.13 or below')
 
+pytestmark = pytest.mark.skipif(bool(pytest.use_hpu) == True,
+                                reason="Megatorn-LM package is not supported HPU backend")
+
 
 # TODO: integrated testing of TP and ZeRO 1/2/3
 def get_deepspeed_model(model):

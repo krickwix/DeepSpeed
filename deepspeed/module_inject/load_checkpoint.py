@@ -11,7 +11,7 @@ from deepspeed.model_implementations.transformers.ds_megatron_gpt import DeepSpe
 from deepspeed.model_implementations.transformers.ds_opt import DeepSpeedOPTInference
 
 import deepspeed.ops.transformer as transformer_inference
-from .layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding, RMSNormalize
+from .layers import LinearLayer, LinearAllreduce, Normalize, EmbeddingLayer, OPTEmbedding, RMSNormalize
 import torch
 import gc
 from deepspeed.accelerator import get_accelerator
@@ -35,7 +35,10 @@ def load_model_with_checkpoint(r_module,
                 return False
         return True
 
-    skip_level_0_prefix = prefix_check() and container.policy.use_load_prefix
+    if container is not None:
+        skip_level_0_prefix = prefix_check() and container.policy.use_load_prefix
+    else:
+        skip_level_0_prefix = prefix_check()
 
     def transpose(data):
         with torch.no_grad():
@@ -48,7 +51,7 @@ def load_model_with_checkpoint(r_module,
     def load(module, prefix):
         args = (sd[0], prefix, {}, True, [], [], error_msgs)
 
-        if hasattr(module, 'weight'):
+        if hasattr(module, 'weight') and prefix + 'weight' in sd[0].keys():
             module.weight = mp_replace.copy(module.weight.data, sd[0][prefix + 'weight'])
         if prefix + 'bias' in sd[0].keys():
             if module.bias.data.is_meta:
@@ -188,6 +191,7 @@ def load_model_with_checkpoint(r_module,
         EmbeddingLayer: load,
         LinearLayer: load,
         Normalize: load,
+        LinearAllreduce: load,
         transformer_inference.DeepSpeedTransformerInference: load_transformer_layer,
         DeepSpeedBloomInference: load_transformer_layer,
         DeepSpeedGPTInference: load_transformer_layer,
@@ -225,7 +229,7 @@ def load_model_with_checkpoint(r_module,
                         child = Normalize(dim=ds_shape[-1], dtype=child.weight.dtype, eps=child.eps)
                         setattr(module, name, child)
                     elif child.__class__ is nn.Linear:
-                        child = LinearLayer(weight_shape=child.weight.shape, bias=child.bias)
+                        child = LinearLayer(weight_shape=child.weight.shape, dtype=child.weight.dtype, bias=child.bias)
                         setattr(module, name, child)
                     elif child.__class__ is OPTLearnedPositionalEmbedding:
                         child = OPTEmbedding(weight_shape=ds_shape)
@@ -256,7 +260,8 @@ def load_model_with_checkpoint(r_module,
     for n, p in r_module.named_parameters():
         if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
             embedding_weight = p
-    if embedding_weight is not None and r_module.lm_head.weight.is_meta:
+    tie_word_embeddings = getattr(r_module.config, 'tie_word_embeddings', True)
+    if embedding_weight is not None and r_module.lm_head.weight.is_meta and tie_word_embeddings:
         r_module.lm_head.weight = embedding_weight
     for sd_ in sd:
         del sd_
