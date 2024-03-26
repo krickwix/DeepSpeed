@@ -25,11 +25,12 @@ class SoftmaxContextOp(BaseOp):
 
     def softmax_context_fallback(self, query_key_value, attn_mask, rotary_dim, rotate_half, rotate_every_two, heads,
                                  num_kv, norm_factor, triangular_masking, local_attention, window_size, no_masking,
-                                 layer_id, num_layers, alibi, rope_theta):
+                                 layer_id, num_layers, alibi, rope_theta, is_prompt, token_idx, position_ids):
         raise NotImplementedError
 
     def forward(self, query_key_value: torch.Tensor, attn_mask: torch.Tensor, heads: int, num_kv: int,
-                norm_factor: float, no_masking: bool, layer_id: int, num_layers: int, alibi: torch.Tensor):
+                norm_factor: float, no_masking: bool, layer_id: int, num_layers: int, alibi: torch.Tensor,
+                is_prompt: bool, token_idx: torch.Tensor, position_ids: torch.Tensor):
 
         if alibi is not None:
             batch_heads = query_key_value.shape[0] * heads
@@ -42,6 +43,6 @@ class SoftmaxContextOp(BaseOp):
                                            self.config.rotate_every_two, heads, num_kv, norm_factor,
                                            self.config.triangular_masking, self.config.local_attention,
                                            self.config.window_size, no_masking, layer_id, num_layers, alibi,
-                                           self.config.rope_theta)
+                                           self.config.rope_theta, is_prompt, token_idx, position_ids)
 
         return output

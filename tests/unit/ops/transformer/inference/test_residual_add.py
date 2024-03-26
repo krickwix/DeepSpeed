@@ -79,6 +79,8 @@ def test_residual_add(inference_module, batch, sequence, hidden_dim, dtype, mlp_
                       pre_attn_norm, use_triton_ops):
     if not deepspeed.HAS_TRITON and use_triton_ops and dtype == torch.float16:
         pytest.skip("triton has to be installed for the test")
+    if use_triton_ops and not get_accelerator().is_triton_supported():
+        pytest.skip(f"triton is not supported by {get_accelerator().device_name()}")
     ds_out = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     residual = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     attn_output = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())

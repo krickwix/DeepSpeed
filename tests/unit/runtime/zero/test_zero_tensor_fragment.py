@@ -6,6 +6,7 @@
 import pytest
 import deepspeed.comm as dist
 import torch
+import os
 
 from unit.common import DistributedTest
 from unit.simple_model import random_dataloader, SimpleModel
@@ -131,6 +132,11 @@ class TestTensorFragmentGet(DistributedTest):
                 "stage": zero_stage,
             }
         }
+        dtype = torch.float16
+        if os.getenv("REPLACE_FP16", default=None):
+            config_dict["fp16"]["enabled"] = False
+            config_dict["bf16"] = {"enabled": True}
+            dtype = torch.bfloat16
 
         if offload_device == OffloadDeviceEnum.cpu:
             config_dict["zero_optimization"]["offload_optimizer"] = {"device": offload_device}
@@ -142,20 +148,20 @@ class TestTensorFragmentGet(DistributedTest):
 
         hidden_dim = 128
         if zero_stage == 3:
-            with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            with deepspeed.zero.Init(config_dict_or_path=config_dict, dtype=dtype):
                 model = MyModel(hidden_dim, frozen_weights)
         else:
             model = MyModel(hidden_dim, frozen_weights)
 
         validate_func = validate_funcs_mapping[api_type]
 
-        run_fragmented_model(model, config_dict, hidden_dim, torch.float16, validate_func)
+        run_fragmented_model(model, config_dict, hidden_dim, dtype, validate_func)
 
     def test_bf16_fragments(self, frozen_weights):
         if frozen_weights:
             pytest.skip("TODO: Frozen weights not currently supported by BF16 Optimizer")
 
-        if not bf16_required_version_check(accelerator_check=False):
+        if (not bf16_required_version_check(accelerator_check=False)):
             pytest.skip(
                 " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
             )
@@ -310,7 +316,6 @@ class TestTensorFragmentUpdate(DistributedTest):
             config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         elif dtype == torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
-
         hidden_dim = 128
         if zero_stage == 3:
             config_dict["zero_optimization"]["param_persistence_threshold"] = hidden_dim

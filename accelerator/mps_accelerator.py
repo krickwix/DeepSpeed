@@ -235,3 +235,6 @@ class MPS_Accelerator(DeepSpeedAccelerator):
         from torch.utils.cpp_extension import BuildExtension
 
         return BuildExtension
+
+    def get_optimizer(self, optimizer_name, cpu_optimization, model_parameters, **optimizer_parameters):
+        return None

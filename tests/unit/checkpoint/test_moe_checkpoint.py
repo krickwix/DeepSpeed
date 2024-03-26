@@ -24,7 +24,11 @@ class TestMoECheckpoint(DistributedTest):
 
         config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 16
-
+        fp16 = config_dict["fp16"]["enabled"]
+        if os.getenv("REPLACE_FP16", default=None):
+            config_dict["fp16"]["enabled"] = False
+            config_dict["fp32"] = {"enabled": True}
+            fp16 = False
         models = [SimpleMoEModel(hidden_dim=hidden_dim, num_experts=ep_size, ep_size=ep_size) for _ in range(2)]
         optimizers = [torch.optim.AdamW(params=model.parameters()) for model in models]
         checkpoint_correctness_verification(config_dict,
@@ -33,7 +37,7 @@ class TestMoECheckpoint(DistributedTest):
                                             tmpdir=tmpdir,
                                             load_optimizer_states=True,
                                             load_lr_scheduler_states=False,
-                                            fp16=config_dict["fp16"]["enabled"],
+                                            fp16=fp16,
                                             empty_tag=True,
                                             base_optimizers=optimizers,
                                             seq_dataloader=True)
@@ -61,9 +65,15 @@ class TestMoECheckpoint(DistributedTest):
             },
             "zero_optimization": {
                 "stage": 2,
+                "reduce_scatter": True
             }
         }
         hidden_dim = 16
+        fp16 = config_dict["fp16"]["enabled"]
+        if os.getenv("REPLACE_FP16", default=None):
+            config_dict["fp16"]["enabled"] = False
+            config_dict["fp32"] = {"enabled": True}
+            fp16 = False
 
         models = [SimpleMoEModel(hidden_dim=hidden_dim, num_experts=ep_size, ep_size=ep_size) for _ in range(2)]
         # param group must have a random unique name (for now)
@@ -77,7 +87,7 @@ class TestMoECheckpoint(DistributedTest):
                                             tmpdir=tmpdir,
                                             load_optimizer_states=load_optim_states,
                                             load_lr_scheduler_states=False,
-                                            fp16=config_dict["fp16"]["enabled"],
+                                            fp16=fp16,
                                             empty_tag=True,
                                             base_optimizers=optimizers,
                                             seq_dataloader=True)

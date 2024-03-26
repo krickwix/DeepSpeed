@@ -16,6 +16,8 @@ from deepspeed.runtime.zero.partitioned_param_profiler import PartitionedParamet
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id
 from deepspeed.accelerator import get_accelerator
+import deepspeed.runtime.compiler as compiler
+
 import logging
 
 ENABLE_PROFILER = False
@@ -122,7 +124,7 @@ class PartitionedParameterCoordinator:
         # mechanism which doesn't require any configuration by the user.
         self.__ongoing_fetch_events: Deque[get_accelerator().Event] = collections.deque()
         # TODO. make this configurable via JSON
-        self.__max_ongoing_fetch_events: int = 2
+        self.__max_ongoing_fetch_events: int = 2 if get_accelerator().device_name() != "hpu" else -1
         self.__profiler = PartitionedParameterProfiler(timers if ENABLE_PROFILER else None)
 
     """Tracing and Tracking
@@ -174,6 +176,7 @@ class PartitionedParameterCoordinator:
                     force=True)
                 self._invalidate_trace()
 
+    @compiler.disable
     def record_module(self, sub_module: Module) -> None:
         """adds sub module to trace"""
         if not self.is_record_trace():
@@ -251,6 +254,7 @@ class PartitionedParameterCoordinator:
     Fetching, prefetching, and releasing parameters
     """
 
+    @compiler.disable
     @instrument_w_nvtx
     @torch.no_grad()
     def fetch_sub_module(self, current_submodule: Module, forward: bool) -> None:
@@ -271,6 +275,7 @@ class PartitionedParameterCoordinator:
         params_to_fetch = frozenset(iter_params(current_submodule))
         fetch_numel = sum(
             [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
+
         if fetch_numel > 0:
             event_name = __class__.FORWARD_FETCH_SUBMIT if forward else __class__.BACKWARD_FETCH_SUBMIT
             self._dump_param_ids(event_name, current_submodule.id,
@@ -297,18 +302,18 @@ class PartitionedParameterCoordinator:
                 with get_accelerator().stream(self.__allgather_stream):
                     while self.__ongoing_fetch_events and self.__ongoing_fetch_events[0].query():
                         self.__ongoing_fetch_events.popleft()
-                    if len(self.__ongoing_fetch_events) > self.__max_ongoing_fetch_events:
+                    if len(self.__ongoing_fetch_events) > self.__max_ongoing_fetch_events > -1:
                         self.__ongoing_fetch_events.popleft().synchronize()
 
                     self.__inflight_param_registry.pop(param).wait()
 
-                    if not get_accelerator().is_synchronized_device():
+                    if not get_accelerator().handles_memory_backpressure():
                         event = get_accelerator().Event()
                         event.record()
                         self.__ongoing_fetch_events.append(event)
 
             assert param.ds_status == ZeroParamStatus.AVAILABLE, param.ds_summary()
-        if not get_accelerator().is_synchronized_device():
+        if not get_accelerator().resolves_data_dependency():
             get_accelerator().current_stream().wait_stream(self.__allgather_stream)
         self.__profiler.stop_event(wait_event_name, wait_numel)
 
@@ -438,7 +443,6 @@ class PartitionedParameterCoordinator:
                 all_gather_numel += param.ds_numel
 
         if partitioned_params:
-            partitioned_params
             self.__n_available_params += all_gather_numel
             with get_accelerator().stream(self.__allgather_stream):
                 event_name = __class__.FORWARD_ALL_GATHER if forward else __class__.BACKWARD_ALL_GATHER
@@ -459,6 +463,7 @@ class PartitionedParameterCoordinator:
             if swap_persisted_params:
                 swap_persisted_params[0].nvme_swapper.remove_partition_and_release_buffers(swap_persisted_params)
 
+    @compiler.disable
     @instrument_w_nvtx
     def __release_param(self, param: Parameter, backward: bool) -> None:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:

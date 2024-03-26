@@ -149,11 +149,33 @@ class PipelineEngine(DeepSpeedEngine):
                 if self.global_rank != min(d['ranks']):
                     tied_params += sum(p.numel() for p in d['module'].parameters())
             unique_params -= tied_params
-        params_tensor = torch.LongTensor(data=[num_params, unique_params]).to(self.device)
+
+        # Use Int32 representation instead of Int64 for calclations.
+        # num_param division & modulo after all reduce should be lower than MAX Int32.
+        # Using this value will be safe if used with less than ~2000 devices.
+        # Int32Max > all_reduce_group*chunk_size
+        chunk_size = 10**6
+
+        num_params_quotient = num_params // chunk_size
+        num_params_remainder = num_params % chunk_size
+
+        unique_params_quotient = unique_params // chunk_size
+        unique_params_remainder = unique_params % chunk_size
+
+        assert (unique_params_quotient * chunk_size +
+                unique_params_remainder) == unique_params, "Value mismatch after Int64 splitting"
+        assert (num_params_quotient * chunk_size +
+                num_params_remainder) == num_params, "Value mismatch after Int64 splitting"
+
+        params_tensor = torch.IntTensor(
+            data=[num_params_quotient, num_params_remainder, unique_params_quotient, unique_params_remainder]).to(
+                self.device)
+
         dist.all_reduce(params_tensor, group=self.grid.get_model_parallel_group())
         params_tensor = params_tensor.tolist()
-        total_params = params_tensor[0]
-        unique_params = params_tensor[1]
+        total_params = params_tensor[0] * chunk_size + params_tensor[1]
+        unique_params = params_tensor[2] * chunk_size + params_tensor[3]
+
         if self.grid.data_parallel_id == 0:
             logger.info(f'RANK={self.global_rank} '
                         f'STAGE={self.stage_id} '
@@ -182,6 +204,11 @@ class PipelineEngine(DeepSpeedEngine):
 
         self.first_output_send = True
         self.first_gradient_send = True
+
+        self.pipe_partition_input_meta_cache = None
+        self.pipe_partition_output_meta_cache = None
+        self.pipe_partition_grad_meta_cache = None
+        self.grad_partition_grad_layer_meta_cache = None
 
         #stores the loss for the current micro batch being processed
         self.loss = torch.tensor(0.0).to(self.device)
@@ -235,6 +262,13 @@ class PipelineEngine(DeepSpeedEngine):
             self.timers(BACKWARD_REDUCE_GLOBAL_TIMER).stop()
             self.timers(STEP_MICRO_TIMER).start()
             self.timers(STEP_MICRO_TIMER).stop()
+
+        # TODO: SW-170309 need to remove the below WA once SW-170308 is resolved
+        import os
+        if os.environ.get('DEEPSPEED_SYNC_MICRO_BATCH_STEP', '0') == '1':
+            self.sync_micro_batch_step = True
+        else:
+            self.sync_micro_batch_step = False
 
     def set_has_attention_mask(self, value):
         assert isinstance(value, bool)
@@ -308,6 +342,11 @@ class PipelineEngine(DeepSpeedEngine):
         self.pipe_recv_buf = None
         self.grad_layer = None
         self.meta_buffer = None
+
+        self.pipe_partition_input_meta_cache = None
+        self.pipe_partition_output_meta_cache = None
+        self.pipe_partition_grad_meta_cache = None
+        self.grad_partition_grad_layer_meta_cache = None
 
     def train_batch(self, data_iter=None):
         """Progress the pipeline to train the next batch of data. The engine will ingest
@@ -393,7 +432,13 @@ class PipelineEngine(DeepSpeedEngine):
         # TODO: should return precisely what loss returned and allow others to be queried?
         return self.agg_train_loss
 
-    def eval_batch(self, data_iter, return_logits=False, compute_loss=True, reduce_output='avg', bcast_loss=True):
+    def eval_batch(self,
+                   data_iter,
+                   return_logits=False,
+                   compute_loss=True,
+                   reduce_output='avg',
+                   bcast_loss=True,
+                   eval_micro_batches=None):
         """Evaluate the pipeline on a batch of data from ``data_iter``. The
         engine will evaluate ``self.train_batch_size()`` total samples
         collectively across all workers.
@@ -443,18 +488,20 @@ class PipelineEngine(DeepSpeedEngine):
         self.set_dataiterator(data_iter)
 
         # Do the work
-        sched = schedule.InferenceSchedule(micro_batches=self.micro_batches,
-                                           stages=self.num_stages,
-                                           stage_id=self.stage_id)
+        micro_batches = self.micro_batches if eval_micro_batches is None \
+                        else eval_micro_batches
+        sched = schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
 
         # prevent dead-lock with multiple evals sequence
-        dist.barrier()
+        if not get_accelerator().device_name() == "hpu":
+            dist.barrier()
 
         with torch.no_grad():
             self._exec_schedule(sched)
 
         if self.is_last_stage():
-            eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output)
+            eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output, \
+                                               eval_micro_batches=eval_micro_batches)
 
         if compute_loss and (bcast_loss or self.monitor.enabled):
             eval_output = self._bcast_pipe_scalar(eval_output)
@@ -496,7 +543,7 @@ class PipelineEngine(DeepSpeedEngine):
         """True if this process is in the last stage in the pipeline."""
         return self.stage_id == self.num_stages - 1
 
-    def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True):
+    def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True, eval_micro_batches=None):
         if reduce is None:
             return outputs
 
@@ -511,7 +558,7 @@ class PipelineEngine(DeepSpeedEngine):
                     reduced[idx] += out
 
             # Average over the microbatches
-            reduced = self._scale_loss_by_gas(reduced)
+            reduced = self._scale_loss_by_gas(reduced, eval_micro_batches)
 
             # Average over DP groups
             if reduce_dp and self.is_data_parallel:
@@ -641,9 +688,12 @@ class PipelineEngine(DeepSpeedEngine):
 
         # collect the partitioned input from the previous stage
         if self.is_pipe_partitioned and not self.is_first_stage():
-            part_input = PartitionedTensor.from_meta(meta=inputs[0],
+            if self.pipe_partition_input_meta_cache is None:
+                self.pipe_partition_input_meta_cache = inputs[0].to('cpu')
+            part_input = PartitionedTensor.from_meta(meta=self.pipe_partition_input_meta_cache,
                                                      local_part=inputs[1],
-                                                     group=self.grid.get_slice_parallel_group())
+                                                     group=self.grid.get_slice_parallel_group(),
+                                                     device=inputs[0].device)
 
             inputs = (part_input.full(), *inputs[2:])
             inputs[0].requires_grad = True
@@ -675,7 +725,7 @@ class PipelineEngine(DeepSpeedEngine):
                 raise ValueError("expecting a tensor or a tuple of tensors")
             part = PartitionedTensor(tensor=first_output, group=self.grid.get_slice_parallel_group())
             # Clear the large output data, but save the computation graph
-            first_output.data = torch.zeros(1)
+            first_output.data = torch.zeros(1, device=first_output.data.device)
             self.pipe_buffers['output_tensors'][buffer_id] = first_output
             # Inject the partitioned tensor into the output before sending
             outputs = (part.to_meta(), part.data(), *outputs_tail)
@@ -718,6 +768,9 @@ class PipelineEngine(DeepSpeedEngine):
         if self.is_last_stage():
             super().backward(self.loss)
             self.mem_status('AFTER BWD')
+            # TODO: SW-170309 need to remove the below WA once SW-170308 is resolved
+            if self.sync_micro_batch_step:
+                _ = self.loss.item()
             return
 
         outputs = self.pipe_buffers['outputs'][buffer_id]
@@ -732,9 +785,12 @@ class PipelineEngine(DeepSpeedEngine):
         # careful to also restore the computational graph of the tensors we partitioned.
         if self.is_pipe_partitioned:
             if self.is_grad_partitioned:
-                part_output = PartitionedTensor.from_meta(meta=outputs[0],
+                if self.pipe_partition_output_meta_cache is None:
+                    self.pipe_partition_output_meta_cache = outputs[0].to('cpu')
+                part_output = PartitionedTensor.from_meta(meta=self.pipe_partition_output_meta_cache,
                                                           local_part=outputs[1],
-                                                          group=self.grid.get_slice_parallel_group())
+                                                          group=self.grid.get_slice_parallel_group(),
+                                                          device=outputs[0].device)
                 self.pipe_buffers['output_tensors'][buffer_id].data = part_output.full()
                 outputs = (self.pipe_buffers['output_tensors'][buffer_id], *outputs[2:])
             else:
@@ -745,9 +801,12 @@ class PipelineEngine(DeepSpeedEngine):
         grad_tensors = self.grad_layer
         if self.is_grad_partitioned:
             #print(f'RANK={self.global_rank} BEFORE-BWD restoring grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
-            part_grad = PartitionedTensor.from_meta(meta=self.grad_layer[0],
+            if self.grad_partition_grad_layer_meta_cache is None:
+                self.grad_partition_grad_layer_meta_cache = self.grad_layer[0].to('cpu')
+            part_grad = PartitionedTensor.from_meta(meta=self.grad_partition_grad_layer_meta_cache,
                                                     local_part=self.grad_layer[1],
-                                                    group=self.grid.get_slice_parallel_group())
+                                                    group=self.grid.get_slice_parallel_group(),
+                                                    device=self.grad_layer[0].device)
             grad_tensors = (part_grad.full(), *grad_tensors[2:])
             part_grad = None
             #print(f'RANK={self.global_rank} BEFORE-BWD restored grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
@@ -761,12 +820,19 @@ class PipelineEngine(DeepSpeedEngine):
             out_tensors = [t for t in outputs if t.is_floating_point()]
             assert len(out_tensors) == len(grad_tensors)
             torch.autograd.backward(tensors=out_tensors, grad_tensors=grad_tensors)
+            # TODO: SW-170309 need to remove the below WA once SW-170308 is resolved
+            if self.sync_micro_batch_step:
+                _ = out_tensors[len(out_tensors) - 1].to('cpu')
         else:
             torch.autograd.backward(tensors=(outputs, ), grad_tensors=(grad_tensors, ))
+            # TODO: SW-170309 need to remove the below WA once SW-170308 is resolved
+            if self.sync_micro_batch_step:
+                _ = outputs.to('cpu')
 
         if self.using_bf16_optimizer and not self.is_last_stage():
             # manually call because we don't call optimizer.backward()
-            self.optimizer.update_hp_grads(clear_lp_grads=False)
+            if not self._config.bfloat16_accumulate_grads_via_hooks:
+                self.optimizer.update_hp_grads(clear_lp_grads=False)
 
         # Free up the memory from the output of forward()
         self.pipe_buffers['output_tensors'][buffer_id] = None
@@ -1063,6 +1129,10 @@ class PipelineEngine(DeepSpeedEngine):
                     buffer = self.meta_buffer
 
                 p2p.recv(buffer, self.prev_stage)
+
+            # Performing the clones in a different loop to reduce host dependency,
+            # and improve performance.
+            for idx, buffer in enumerate(self.pipe_recv_buf):
                 recvd[idx] = buffer.clone().detach()
 
             # NCCL does not like to send torch.BoolTensor types, so un-cast the
@@ -1088,9 +1158,12 @@ class PipelineEngine(DeepSpeedEngine):
         # XXX these shapes are hardcoded for Megatron
         # Restore partitioned output if it was partitioned and we are sending full gradients
         if self.is_pipe_partitioned and not self.is_grad_partitioned:
-            part_output = PartitionedTensor.from_meta(meta=outputs[0],
+            if self.pipe_partition_grad_meta_cache is None:
+                self.pipe_partition_grad_meta_cache = outputs[0].to('cpu')
+            part_output = PartitionedTensor.from_meta(meta=self.pipe_partition_grad_meta_cache,
                                                       local_part=outputs[1],
-                                                      group=self.grid.get_slice_parallel_group())
+                                                      group=self.grid.get_slice_parallel_group(),
+                                                      device=outputs[0].device)
             outputs[0].data = part_output.full()
             outputs = (outputs[0], *outputs[2:])
             # save for backward

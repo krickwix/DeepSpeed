@@ -136,6 +136,8 @@ def create_moe_param_groups(model):
 
 
 def create_deepspeed_model(config_dict, model, base_optimizer):
+    if get_accelerator().device_name() == 'hpu':
+        model.to(get_accelerator().device_name())
     ds_model, _, _, _ = deepspeed.initialize(config=config_dict,
                                              model=model,
                                              model_parameters=create_moe_param_groups(model),

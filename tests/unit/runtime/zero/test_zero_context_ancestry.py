@@ -5,6 +5,7 @@
 
 import torch
 import deepspeed
+import os
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.accelerator import get_accelerator
 
@@ -67,7 +68,12 @@ class TestSerialParamInit(DistributedTest):
 
     def test_subclass_param_init(self):
         setup_serial_env()
-        with deepspeed.zero.Init(config=config):
+        dtype = None
+        if os.getenv("REPLACE_FP16", default=None):
+            config["fp16"]["enabled"] = False
+            config["bf16"] = {"enabled": True}
+            dtype = torch.bfloat16
+        with deepspeed.zero.Init(config=config, dtype=dtype):
             model = Son().cpu()
 
         # test that all params have been partitioned
@@ -107,7 +113,10 @@ class TestDSInitWZinit(DistributedTest):
             def magic(self):
                 return 42
 
-        with deepspeed.zero.Init():
+        dtype = torch.float16
+        if os.getenv("REPLACE_FP16", default=None):
+            dtype = torch.float32
+        with deepspeed.zero.Init(dtype=dtype):
             model = Model()
             engine, *_ = deepspeed.initialize(model=model, config=ds_config, model_parameters=model.parameters())
         assert engine.magic() == 42

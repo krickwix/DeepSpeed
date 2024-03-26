@@ -11,7 +11,10 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.inference_utils import DtypeEnum
 from deepspeed.inference.v2.kernels.ragged_ops import RaggedTop1Gating
 from .ragged_testing_utils import build_simple_batch
-from ....v2.inference_test_utils import allclose
+from ....v2.inference_test_utils import allclose, skip_on_inference_v2
+
+pytestmark = pytest.mark.skipif(skip_on_inference_v2(),
+                                reason=f'Inference V2 not supported by {get_accelerator().device_name()}.')
 
 
 def _test_single_mapping_helper(n_tokens: int,

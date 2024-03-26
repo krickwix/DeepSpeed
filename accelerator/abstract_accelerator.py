@@ -17,6 +17,18 @@ class DeepSpeedAccelerator(ABC):
     def is_synchronized_device(self):
         ...
 
+    @abc.abstractmethod
+    def use_host_timers(self):
+        ...
+
+    @abc.abstractmethod
+    def resolves_data_dependency(self):
+        ...
+
+    @abc.abstractmethod
+    def handles_memory_backpressure(self):
+        ...
+
     # Device APIs
     @abc.abstractmethod
     def device_name(self, device_index):
@@ -253,6 +265,11 @@ class DeepSpeedAccelerator(ABC):
     # return an op builder class, specified by class_name
     @abc.abstractmethod
     def get_op_builder(self, class_name):
+        ...
+
+    # creates and returns an optimizer, specified by optimizer_name, when the accelerator has its own implementation
+    @abc.abstractmethod
+    def get_optimizer(self, optimizer_name, cpu_optimization, model_parameters, **optimizer_parameters):
         ...
 
     @abc.abstractmethod

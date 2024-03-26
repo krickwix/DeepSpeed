@@ -8,9 +8,7 @@ from deepspeed.ops.op_builder import FusedLambBuilder
 
 from unit.common import DistributedTest
 from unit.simple_model import *
-
 from unit.checkpoint.common import checkpoint_correctness_verification
-
 import pytest
 
 
@@ -49,7 +47,11 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 }
             }
         }
-
+        fp16 = True
+        if os.getenv("REPLACE_FP16", default=None):
+            config_dict["fp16"]["enabled"] = False
+            config_dict["fp32"] = {"enabled": True}
+            fp16 = False
         args = args_from_dict(tmpdir, config_dict)
         hidden_dim = 10
         models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
@@ -59,14 +61,16 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=True)
+                                            load_optimizer_states=True,
+                                            fp16=fp16)
 
         # Ignore optimizer states
         checkpoint_correctness_verification(config_dict,
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=False)
+                                            load_optimizer_states=False,
+                                            fp16=fp16)
 
     def test_checkpoint_fused_optimizer(self, tmpdir):
         config_dict = {
@@ -85,6 +89,11 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 "enabled": True
             }
         }
+        fp16 = True
+        if os.getenv("REPLACE_FP16", default=None):
+            config_dict["fp16"]["enabled"] = False
+            config_dict["fp32"] = {"enabled": True}
+            fp16 = False
 
         args = args_from_dict(tmpdir, config_dict)
         hidden_dim = 10
@@ -95,14 +104,16 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=True)
+                                            load_optimizer_states=True,
+                                            fp16=fp16)
 
         # Ignore optimizer states
         checkpoint_correctness_verification(config_dict,
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=False)
+                                            load_optimizer_states=False,
+                                            fp16=fp16)
 
     def test_checkpoint_fp32_optimizer(self, tmpdir):
         config_dict = {
