@@ -21,6 +21,9 @@ except ImportError:
     _amp_available = False
 amp_available = pytest.mark.skipif(not _amp_available, reason="apex/amp is not installed")
 
+if torch.half not in get_accelerator().supported_dtypes():
+    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
+
 
 class TestLambFP32GradClip(DistributedTest):
     world_size = 2
@@ -561,7 +564,6 @@ class TestZeroSupportedClientOptimizer(DistributedTest):
             }
         }
         hidden_dim = 10
-
         model = SimpleModel(hidden_dim)
         client_optimizer = optimizer_constructor(params=model.parameters())
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=client_optimizer)

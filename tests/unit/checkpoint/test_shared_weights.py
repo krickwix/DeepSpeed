@@ -9,6 +9,7 @@ import torch.nn as nn
 import deepspeed
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from unit.common import DistributedTest
+from deepspeed.accelerator import get_accelerator
 
 
 class ModelWithSharedWeights(nn.Module):
@@ -34,8 +35,10 @@ class TestCheckpointSharedWeights(DistributedTest):
             },
         }
         model = ModelWithSharedWeights()
+        if get_accelerator().device_name() == 'hpu':
+            device = get_accelerator().current_device_name()
+            model.to(device)
         optimizer = torch.optim.Adam(model.parameters())
-
         deepspeed_engine, _, _, _ = deepspeed.initialize(
             config=config,
             model=model,

@@ -6,7 +6,9 @@
 import os
 import torch
 import types
-from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS)
+# todo: remove VOCAB_DIVISIBILITY_PADDING_TENSOR once transition to universal checkpointing is completed
+from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, VOCAB_DIVISIBILITY_PADDING_TENSOR, CAT_DIM,
+                        PARAM_N_SUB_PARAMS)
 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
@@ -53,6 +55,23 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
             if padded_target_vocab_size > full_hp_param.shape[0]:
                 padding_size = padded_target_vocab_size - full_hp_param.shape[0]
                 full_hp_param = torch.nn.functional.pad(full_hp_param, (0, 0, 0, padding_size), "constant", 0)
+
+        # TODO: For BWD compatibility with old universal checkpointing mechanism, remove once transition is completed
+        vocab_divisibility_padding_tensor = ckpt_dict.get(VOCAB_DIVISIBILITY_PADDING_TENSOR, None)
+        if vocab_divisibility_padding_tensor is not None:
+            # In the absence of data passed from the user wrt new padded vocab specific to tp degree
+            # we can again derive that data by reverse engineering the target shapes like so:
+            padded_target_vocab_size = self.shape[0] * tp_world_size
+            if padded_target_vocab_size > full_hp_param.shape[0]:
+                # Need to expand
+                pad_size = padded_target_vocab_size - full_hp_param.shape[0]
+                hidden_size = vocab_divisibility_padding_tensor.shape[-1]
+                padding_tensor = vocab_divisibility_padding_tensor.view(1, -1).expand(pad_size, hidden_size)
+                full_hp_param = torch.nn.functional.pad(full_hp_param, (0, 0, 0, pad_size), "constant", 0)
+                full_hp_param[-pad_size:, :] = padding_tensor
+            else:
+                # Need to shrink or keep the same
+                full_hp_param = full_hp_param[:padded_target_vocab_size, :]
 
         full_param_numel = full_hp_param.numel()
         tp_slice_numel = self.numel()

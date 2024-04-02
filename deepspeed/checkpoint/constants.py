@@ -58,6 +58,8 @@ UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.2
 
 # Vocabulary padding
 VOCAB_TENSOR = 'vocab_tensor'
+# TODO: remove once transition to new universal checkpoint is completed
+VOCAB_DIVISIBILITY_PADDING_TENSOR = 'vocab_divisibility_padding_tensor'
 PADDED_VOCAB_SIZE = 'padded_vocab_size'
 ORIGINAL_VOCAB_SIZE = 'original_vocab_size'
 

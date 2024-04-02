@@ -87,7 +87,6 @@ class DeepSpeedTransformerInference(nn.Module):
                                        requires_grad=False)
             self.norm_b = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
                                        requires_grad=False)
-        self.layer_past = None
         try:
             if config.dtype == torch.float32:
                 self.allocate_workspace = inference_module.allocate_workspace_fp32
@@ -149,10 +148,7 @@ class DeepSpeedTransformerInference(nn.Module):
         get_present = (get_present or get_key_value or use_cache)
         input_mask = input_mask if attention_mask is None else attention_mask
 
-        # We set the prev key/value to None when there is a prompt
-        if input.shape[1] > 1:
-            self.layer_past = None
-        layer_past = layer_past if layer_past is not None else self.layer_past
+        layer_past = past_key_value if past_key_value is not None else layer_past
         head_mask = layer_head_mask if layer_head_mask is not None else head_mask
 
         attn_mask = None
@@ -178,10 +174,10 @@ class DeepSpeedTransformerInference(nn.Module):
                                               output_attentions,
                                               self.norm_w,
                                               self.norm_b,
-                                              alibi)
+                                              alibi,
+                                              **kwargs)
 
             presents = (key, value)
-            self.layer_past = presents if layer_past is None else None
             output = self.mlp(attention_output, input, inp_norm, self.attention.attn_ob)
 
             if not self.config.pre_layer_norm:

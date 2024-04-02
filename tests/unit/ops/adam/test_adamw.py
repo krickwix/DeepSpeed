@@ -6,7 +6,7 @@
 import deepspeed
 import torch
 import pytest
-
+import os
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from unit.common import DistributedTest
@@ -67,6 +67,9 @@ class TestAdamConfigs(DistributedTest):
                 "cpu_offload": zero_offload
             }
         }
+        if os.getenv("REPLACE_FP16", default=None):
+            config_dict["fp16"]["enabled"] = False
+            config_dict["fp32"] = {"enabled" : True}
         model = SimpleModel(10)
         model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,

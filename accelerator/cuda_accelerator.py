@@ -42,6 +42,15 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def is_synchronized_device(self):
         return False
 
+    def use_host_timers(self):
+        return self.is_synchronized_device()
+
+    def resolves_data_dependency(self):
+        return self.is_synchronized_device()
+
+    def handles_memory_backpressure(self):
+        return self.is_synchronized_device()
+
     # Device APIs
     def device_name(self, device_index=None):
         if device_index == None:
@@ -183,11 +192,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return torch.cuda.is_bf16_supported()
 
     def is_fp16_supported(self):
-        major, _ = torch.cuda.get_device_capability()
-        if major >= 7:
-            return True
-        else:
-            return False
+        return True
 
     def supported_dtypes(self):
         return [torch.float, torch.half, torch.bfloat16]
@@ -322,3 +327,6 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def build_extension(self):
         from torch.utils.cpp_extension import BuildExtension
         return BuildExtension
+
+    def get_optimizer(self, optimizer_name, cpu_optimization, model_parameters, **optimizer_parameters):
+        return None

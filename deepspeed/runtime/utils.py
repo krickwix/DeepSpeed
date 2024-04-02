@@ -343,44 +343,53 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
     parameters = list(filter(lambda p: p.grad is not None, parameters))
-    max_norm = float(max_norm)
     norm_type = float(norm_type)
+    all_norms = []
     if norm_type == inf:
-        total_norm = max(p.grad.data.abs().max() for p in parameters)
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
+        for p in parameters:
+            all_norms.append(p.grad.data.abs().max().float())
+        total_norm = torch.stack(all_norms).max()
+        origin_device = total_norm.device.type
+        total_norm = total_norm.to(get_accelerator().device_name())
         # Take max across all GPUs.
         if mpu is not None:
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
-        total_norm = total_norm_cuda[0].item()
+            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
         for p in parameters:
             if mpu is not None:
                 if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
-                    param_norm = p.grad.data.norm(norm_type)
-                    total_norm += param_norm.item()**norm_type
+                    param_norm = p.grad.data.detach().float().norm(norm_type)
+                    all_norms.append(param_norm)
             else:
-                param_norm = p.grad.data.float().norm(norm_type)
-                total_norm += param_norm.item()**norm_type
-
+                param_norm = p.grad.data.detach().float().norm(norm_type)
+                all_norms.append(param_norm)
+        if len(all_norms) > 0:
+            total_norm = torch.stack(all_norms).square().sum().float()
+        else:
+            total_norm = torch.FloatTensor([0.0]).to(parameters[0].device)
+        origin_device = total_norm.device.type
+        total_norm = total_norm.to(get_accelerator().device_name())
         # Sum across all model parallel GPUs.
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
         if mpu is not None:
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
-        total_norm = total_norm_cuda[0].item()**(1. / norm_type)
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
+        total_norm = total_norm.pow(1. / norm_type)
 
     # Need to average total_norm across different GPUs due to the presence of moe params
     pg = groups._get_data_parallel_group()
     scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
+    scaled_norm_tensor = scaled_norm
 
-    scaled_norm_tensor = get_accelerator().FloatTensor([float(scaled_norm)])
     dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor.item()
+    total_norm = scaled_norm_tensor
+    total_norm = total_norm.to(origin_device)
 
+    max_norm = torch.tensor([float(max_norm)], device=parameters[0].device)
     clip_coef = max_norm / (total_norm + 1e-6)
-    if clip_coef < 1:
-        for p in parameters:
-            p.grad.data.mul_(clip_coef)
+    tmp_tensor = torch.tensor([1.0], device=parameters[0].device)
+    clip_coef = torch.max(tmp_tensor, clip_coef)
+    for p in parameters:
+        p.grad.data.mul_(clip_coef)
     return total_norm
 
 
@@ -748,6 +757,8 @@ def memory_status(msg, print_rank=-1, reset_max=False):
     new_alloced = get_accelerator().memory_allocated()
     new_cached = get_accelerator().memory_cached()
 
+    new_alloced = torch_memory_allocated()  # noqa: F821
+
     delta_alloced = new_alloced - mem_alloced
     delta_cached = new_cached - mem_cached
 
@@ -875,18 +886,22 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None):
     assert all([torch.is_tensor(t) for t in input_tensors]), f'expected list of only tensors'
 
     norm_type = float(norm_type)
+    all_norms = []
     if norm_type == inf:
-        total_norm = max(t.data.abs().max() for t in input_tensors)
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
+        for t in input_tensors:
+            all_norms.append(t.data.abs().max().float())
+        total_norm_cuda = torch.stack(all_norms).max()
         if mpu is not None:
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
-            total_norm = total_norm_cuda[0].item()
+            total_norm = total_norm_cuda.item()
     else:
-        total_norm = sum([t.data.float().norm(norm_type).item()**norm_type for t in input_tensors])
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
+        for t in input_tensors:
+            all_norms.append(t.data.float().norm(norm_type))
+        total_norm_cuda = torch.stack(all_norms).pow(norm_type).sum()
+
         if mpu is not None:
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
-        total_norm = total_norm_cuda[0].item()**(1. / norm_type)
+        total_norm = total_norm_cuda.item()**(1. / norm_type)
 
     if total_norm == float('inf') or total_norm == -float('inf') or total_norm != total_norm:
         total_norm = -1

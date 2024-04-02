@@ -38,6 +38,7 @@ def test_moe_residual_matmul(hidden_dim, c, dtype):
     coeff2 = torch.randn((1, 1, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     out_ds = torch.randn((c, hidden_dim * c, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     coeff_ds = torch.cat((coeff1, coeff2), dim=-1)
+
     residual_ref = residual_ds.clone().detach()
     coeff_ref = coeff_ds.clone().detach()
     out_ref = out_ds.clone().detach()

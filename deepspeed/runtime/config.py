@@ -31,6 +31,7 @@ from .activation_checkpointing.config import DeepSpeedActivationCheckpointingCon
 from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import get_monitor_config
 from ..inference.config import WeightQuantConfig
+from .compiler import get_compile_config
 
 from deepspeed import comm as dist
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
@@ -165,6 +166,13 @@ def get_bfloat16_enabled(param_dict):
     for key in [BFLOAT16, BFLOAT16_OLD]:
         if key in param_dict.keys():
             return get_scalar_param(param_dict[key], BFLOAT16_ENABLED, BFLOAT16_ENABLED_DEFAULT)
+    return False
+
+
+def get_bfloat16_accumulate_grads_via_hooks(param_dict):
+    for key in [BFLOAT16, BFLOAT16_OLD]:
+        if key in param_dict.keys():
+            return get_scalar_param(param_dict[key], BFLOAT16_GRAD_ACC_VIA_HOOKS, BFLOAT16_GRAD_ACC_VIA_HOOKS_DEFAULT)
     return False
 
 
@@ -495,6 +503,10 @@ def get_zero_force_ds_cpu_optimizer(param_dict):
     return get_scalar_param(param_dict, ZERO_FORCE_DS_CPU_OPTIMIZER, ZERO_FORCE_DS_CPU_OPTIMIZER_DEFAULT)
 
 
+def get_zero_allow_comm_data_type_fp32(param_dict):
+    return get_scalar_param(param_dict, ZERO_ALLOW_COMM_DATA_TYPE_FP32, ZERO_ALLOW_COMM_DATA_TYPE_FP32_DEFAULT)
+
+
 def get_scheduler_name(param_dict):
     if SCHEDULER in param_dict.keys() and TYPE in param_dict[SCHEDULER].keys():
         return param_dict[SCHEDULER][TYPE]
@@ -813,6 +825,7 @@ class DeepSpeedConfig(object):
         self.fp16_enabled = get_fp16_enabled(param_dict)
         self.fp16_auto_cast = get_fp16_auto_cast(param_dict)
         self.bfloat16_enabled = get_bfloat16_enabled(param_dict)
+        self.bfloat16_accumulate_grads_via_hooks = get_bfloat16_accumulate_grads_via_hooks(param_dict)
         assert not (self.fp16_enabled
                     and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
         self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(param_dict)
@@ -893,6 +906,8 @@ class DeepSpeedConfig(object):
 
         self.weight_quantization_config = WeightQuantConfig(
             **param_dict['weight_quantization']) if 'weight_quantization' in param_dict else None
+
+        self.compile_config = get_compile_config(param_dict)
 
     def _batch_assertion(self):
 

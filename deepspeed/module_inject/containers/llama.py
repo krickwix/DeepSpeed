@@ -25,6 +25,7 @@ class DS_LLAMAContainer(MetaTensorContainer, HybridGatedMLPContainer, HybridSpli
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.triangular_masking = False
 
         # All model specific things should be defined here instead of the base class.
 

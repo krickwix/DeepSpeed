@@ -50,7 +50,7 @@ class SynchronizedWallClockTimer:
             self.name_ = name
             self.started_ = False
             self.event_timers = []
-            self.use_host_timer = get_accelerator().is_synchronized_device()
+            self.use_host_timer = get_accelerator().use_host_timers()
             self.start_event = None
             self.elapsed_records = None
             self.start_time = 0.0
@@ -237,7 +237,8 @@ class ThroughputTimer:
         self._init_timer()
         self.started = True
         if self.global_step_count >= self.start_step:
-            get_accelerator().synchronize()
+            if not get_accelerator().device_name() == 'hpu':
+                get_accelerator().synchronize()
             self.start_time = time.time()
 
     def stop(self, global_step=False, report_speed=True):
@@ -249,13 +250,15 @@ class ThroughputTimer:
             self.global_step_count += 1
 
         if self.start_time > 0:
-            get_accelerator().synchronize()
+            if not get_accelerator().device_name() == 'hpu':
+                get_accelerator().synchronize()
             self.end_time = time.time()
             duration = self.end_time - self.start_time
             self.total_elapsed_time += duration
             self.step_elapsed_time += duration
 
             if global_step:
+                #curr_samples_sec = (self.batch_size * self.num_workers) / duration
                 if report_speed and self.global_step_count % self.steps_per_output == 0:
                     self.logging(
                         "epoch={}/micro_step={}/global_step={}, RunningAvgSamplesPerSec={}, CurrSamplesPerSec={}, "

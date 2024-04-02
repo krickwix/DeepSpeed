@@ -10,6 +10,7 @@
 
 import pytest
 import torch
+import os
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import SparseAttnBuilder
@@ -130,6 +131,10 @@ def test_softmax(block, width, dtype):
     skip_on_arch(min_arch=7)
     skip_on_cuda(valid_cuda=valid_cuda_versions)
 
+    if os.getenv("REPLACE_FP16", default=None):
+        if dtype == torch.float16:
+            dtype = torch.bfloat16
+
     Z = 2
     H = 4
     scale = 0.4
@@ -235,6 +240,10 @@ def test_matmul(block, dtype, mode, trans_a, trans_b):
     valid_cuda_versions = [101, 102, 110, 111]
     skip_on_arch(min_arch=7)
     skip_on_cuda(valid_cuda=valid_cuda_versions)
+
+    if os.getenv("REPLACE_FP16", default=None):
+        if dtype == torch.float16:
+            dtype = torch.bfloat16
 
     Z = 3
     H = 2

@@ -38,8 +38,8 @@ class ResidualAddOp(BaseOp):
                 final_bias: Optional[torch.Tensor] = None):
 
         if self.residual_add_func is not None:
-            if final_bias is None:
-                residual = self._vector_add(residual, hidden_state, 1.0 / self.config.mp_size)
+            if final_bias is None and attention_bias is None:
+                residual = self._vector_add(residual + attention_output, hidden_state, 1.0 / self.config.mp_size)
             else:
                 if not self.config.pre_layer_norm and residual_add is not None:
                     # only use residual add if its set and we are not pre layer norm

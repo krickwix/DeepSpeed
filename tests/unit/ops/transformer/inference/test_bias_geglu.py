@@ -15,6 +15,7 @@ if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 inference_module = None
+inference_torch_module = None
 torch_minor_version = None
 
 
@@ -66,7 +67,7 @@ def run_gated_silu_ds(activation, bias):
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("sequence", [1, 128, 255])
 @pytest.mark.parametrize("channels", [512, 1232, 4096])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("dtype", get_dtypes())
 def test_gated_silu(batch, sequence, channels, dtype):
     activation = torch.randn((batch, sequence, channels * 2), dtype=dtype, device=get_accelerator().device_name())
     bias = torch.randn((channels * 2), dtype=dtype, device=get_accelerator().device_name())
