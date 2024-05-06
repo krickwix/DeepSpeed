@@ -182,6 +182,7 @@ class InferenceEngine(Module):
 
         if config.enable_cuda_graph and get_accelerator().device_name() == 'hpu':
             import habana_frameworks.torch as ht
+            print(">>>>>>> Wrapping model in HPU graph <<<<<<<<<<")
             self.module = ht.hpu.wrap_in_hpu_graph(self.module, disable_tensor_cache=True, max_graphs=1)
         elif config.tensor_parallel.tp_size > 1:
             assert not config.enable_cuda_graph, "Cuda graph is not supported for model parallelism"
